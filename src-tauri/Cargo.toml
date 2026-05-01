@@ -1,0 +1,106 @@
+[package]
+name = "satisfactory-layout-tool"
+version = "2.0.0"
+description = "High-performance Satisfactory factory layout tool with Rust backend"
+authors = ["Austin Handle (Officer ASH) <https://x.com/Officer_ASH>"]
+license = "AGPL-3.0-or-later"
+license-file = "../LICENSE"
+repository = "https://github.com/HandleConsolidated/nexus-satisfactory-layout-tool"
+edition = "2021"
+rust-version = "1.77.2"
+default-run = "satisfactory_layout_tool_app"
+
+[lib]
+name = "satisfactory_layout_tool"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "satisfactory_layout_tool_app"
+path = "src/main.rs"
+
+[[bin]]
+name = "standalone-server"
+path = "src/standalone_main.rs"
+required-features = ["standalone"]
+
+# Note: standalone-server-complete removed - file doesn't exist
+
+[features]
+default = ["tauri-mode"]
+tauri-mode = ["dep:tauri", "dep:tauri-plugin-log", "dep:tauri-plugin-fs", "dep:tauri-plugin-dialog", "dep:tauri-plugin-updater", "dep:tauri-plugin-process", "dep:tauri-build"]
+standalone = []
+
+[build-dependencies]
+tauri-build = { version = "2.3.1", features = [], optional = true }
+
+[dependencies]
+# Core framework
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+log = "0.4"
+tauri = { version = "2.7.0", features = ["image-ico", "image-png"], optional = true }
+tauri-plugin-log = { version = "2", optional = true }
+tauri-plugin-fs = { version = "2", optional = true }
+tauri-plugin-dialog = { version = "2", optional = true }
+tauri-plugin-updater = { version = "2", optional = true }
+tauri-plugin-process = { version = "2", optional = true }
+
+# Performance and parallelization
+rayon = "1.8"
+uuid = { version = "1.6", features = ["v4", "serde"] }
+
+# Serialization and compression
+bincode = "1.3"
+flate2 = "1.0"
+
+# Mathematical operations
+wide = "0.7"  # SIMD operations
+nalgebra = "0.32"  # Linear algebra
+
+# Data structures
+indexmap = "2.1"
+dashmap = "5.5"  # Concurrent HashMap
+
+# Async operations
+tokio = { version = "1.35", features = ["full"] }
+futures = "0.3"
+axum = "0.7"  # HTTP server for browser bridge
+tower = "0.5"  # HTTP middleware
+tower-http = { version = "0.5", features = ["cors"] }  # CORS support
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Date/time handling
+chrono = "0.4"
+
+# Cryptography for checksums
+sha2 = "0.10"
+
+# Logging for standalone mode
+env_logger = "0.11"
+
+# Spatial indexing for high-performance intersection detection
+rstar = "0.12"
+
+# Graph algorithms for network analysis and pathfinding
+petgraph = "0.6"
+
+# GPU computing with wgpu
+wgpu = "0.20"
+pollster = "0.3"  # Async runtime for blocking GPU operations
+bytemuck = { version = "1.16", features = ["derive"] }  # Safe casting for GPU buffers
+[profile.release]
+# Optimize for performance
+lto = true
+codegen-units = 1
+opt-level = 3
+panic = "abort"
+strip = true
+
+[profile.dev]
+# Fast compilation for development
+opt-level = 0
+debug = true
+

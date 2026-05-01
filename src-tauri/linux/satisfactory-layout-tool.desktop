@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=Satisfactory Layout Tool
+Comment=Design and plan your Satisfactory factory layouts
+Exec=satisfactory-layout-tool %U
+Icon=satisfactory-layout-tool
+Terminal=false
+Type=Application
+Categories=Graphics;Engineering;Game;
+MimeType=application/x-satisfactory-layout;application/json;
+Keywords=satisfactory;factory;layout;design;planning;
+StartupNotify=true
+StartupWMClass=satisfactory-layout-tool

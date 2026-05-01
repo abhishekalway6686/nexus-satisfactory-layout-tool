@@ -1,0 +1,234 @@
+import { useEffect, useCallback, useState } from 'react';
+import { useLayoutStore } from '../store/layoutStore';
+
+interface KeyboardShortcut {
+  key: string;
+  ctrl?: boolean;
+  shift?: boolean;
+  alt?: boolean;
+  action: () => void;
+  description: string;
+  category: 'tool' | 'drawing' | 'view' | 'edit';
+}
+
+export const useKeyboardShortcuts = () => {
+  const [activeModifiers, setActiveModifiers] = useState({
+    shift: false,
+    ctrl: false,
+    alt: false
+  });
+
+  const {
+    selectedTool,
+    setSelectedTool,
+    showGrid,
+    toggleGrid,
+    showKeyboardShortcuts,
+    toggleKeyboardShortcuts,
+    debugOverlay,
+    toggleDebugOverlay,
+    showBuildingPalette,
+    toggleBuildingPalette,
+    undo,
+    redo,
+    canUndo,
+    canRedo,
+    deleteBuilding,
+    deletePole,
+    deletePipeSupport,
+    deleteStickyNote,
+    deleteRailwayNode,
+    deleteConveyorLift,
+    deletePipeFloorConnection,
+    deleteFoundation,
+    deleteWall,
+    selectedBuilding,
+    selectedPole,
+    selectedPipeSupport,
+    selectedStickyNote,
+    selectedRailwayNode,
+    selectedConveyorLift,
+    selectedPipeFloorConnection,
+    selectedFoundation,
+    selectedWall,
+    rotateBuilding,
+    setDrawingState,
+    drawingState,
+    conveyorMode,
+    setConveyorMode,
+    cancelDrawing,
+    finishDrawingConveyor,
+    finishPipeDrawing,
+    finishRailwayDrawing,
+    clearSelection
+  } = useLayoutStore();
+
+  // Get any selected item
+  const getSelectedItem = useCallback(() => {
+    if (selectedBuilding) return { type: 'building', id: selectedBuilding };
+    if (selectedPole) return { type: 'pole', id: selectedPole };
+    if (selectedPipeSupport) return { type: 'pipeSupport', id: selectedPipeSupport };
+    if (selectedStickyNote) return { type: 'stickyNote', id: selectedStickyNote };
+    if (selectedRailwayNode) return { type: 'railwayNode', id: selectedRailwayNode };
+    if (selectedConveyorLift) return { type: 'conveyorLift', id: selectedConveyorLift };
+    if (selectedPipeFloorConnection) return { type: 'pipeFloorConnection', id: selectedPipeFloorConnection };
+    if (selectedFoundation) return { type: 'foundation', id: selectedFoundation };
+    if (selectedWall) return { type: 'wall', id: selectedWall };
+    return null;
+  }, [
+    selectedBuilding, selectedPole, selectedPipeSupport, selectedStickyNote,
+    selectedRailwayNode, selectedConveyorLift, selectedPipeFloorConnection,
+    selectedFoundation, selectedWall
+  ]);
+
+  // Delete selected item
+  const deleteSelected = useCallback(() => {
+    const selected = getSelectedItem();
+    if (!selected) return;
+
+    switch (selected.type) {
+      case 'building':
+        deleteBuilding(selected.id);
+        break;
+      case 'pipeSupport':
+        deletePipeSupport(selected.id);
+        break;
+      case 'stickyNote':
+        deleteStickyNote(selected.id);
+        break;
+      case 'railwayNode':
+        deleteRailwayNode(selected.id);
+        break;
+      case 'conveyorLift':
+        deleteConveyorLift(selected.id);
+        break;
+      case 'pipeFloorConnection':
+        deletePipeFloorConnection(selected.id);
+        break;
+      case 'foundation':
+        deleteFoundation(selected.id);
+        break;
+      case 'wall':
+        deleteWall(selected.id);
+        break;
+    }
+  }, [
+    getSelectedItem, deleteBuilding, deletePole, deletePipeSupport,
+    deleteStickyNote, deleteRailwayNode, deleteConveyorLift,
+    deletePipeFloorConnection, deleteFoundation, deleteWall
+  ]);
+
+  // Finish current drawing operation
+  const finishDrawing = useCallback(() => {
+    if (drawingState.isDrawing) {
+      finishDrawingConveyor();
+    } else if (drawingState.drawingPipe) {
+      finishPipeDrawing();
+    } else if (drawingState.drawingRailway) {
+      finishRailwayDrawing();
+    }
+  }, [drawingState, finishDrawingConveyor, finishPipeDrawing, finishRailwayDrawing]);
+
+  // Define all keyboard shortcuts
+  const shortcuts: KeyboardShortcut[] = [
+    // Tool switching
+    { key: 'q', action: () => setSelectedTool('select'), description: 'Select tool', category: 'tool' },
+    { key: 'w', action: () => setSelectedTool('move'), description: 'Move tool', category: 'tool' },
+    { key: 'e', action: () => {
+      if (selectedBuilding) {
+        rotateBuilding(selectedBuilding);
+      } else {
+        setSelectedTool('rotate');
+      }
+    }, description: 'Rotate selected building / Rotate tool', category: 'tool' },
+    { key: 'r', action: () => {
+      if (drawingState.isDrawing) {
+        setConveyorMode(conveyorMode === 'default' ? 'straight' : 'default');
+      }
+    }, description: 'Toggle conveyor mode (during drawing)', category: 'drawing' },
+    { key: 't', action: () => setSelectedTool('delete'), description: 'Delete tool', category: 'tool' },
+    { key: 'b', action: () => toggleBuildingPalette(), description: 'Toggle building palette', category: 'view' },
+
+    // Drawing operations
+    { key: 'Enter', action: finishDrawing, description: 'Finish current drawing', category: 'drawing' },
+    { key: 'f', action: finishDrawing, description: 'Finish current drawing', category: 'drawing' },
+    { key: 'Escape', action: () => {
+      cancelDrawing();
+      clearSelection();
+    }, description: 'Cancel drawing/Clear selection', category: 'drawing' },
+
+    // View controls
+    { key: 'g', action: () => toggleGrid(), description: 'Toggle grid', category: 'view' },
+    { key: 'h', action: () => toggleKeyboardShortcuts(), description: 'Toggle help/shortcuts panel', category: 'view' },
+    { key: 'd', ctrl: true, action: () => toggleDebugOverlay(), description: 'Toggle debug overlay', category: 'view' },
+
+    // Edit operations
+    { key: 'Delete', action: deleteSelected, description: 'Delete selected', category: 'edit' },
+    { key: 'Backspace', action: deleteSelected, description: 'Delete selected', category: 'edit' },
+    { key: 'z', ctrl: true, action: () => canUndo() && undo(), description: 'Undo', category: 'edit' },
+    { key: 'y', ctrl: true, action: () => canRedo() && redo(), description: 'Redo', category: 'edit' },
+  ];
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Update modifier states
+      setActiveModifiers({
+        shift: e.shiftKey,
+        ctrl: e.ctrlKey || e.metaKey,
+        alt: e.altKey
+      });
+
+      // Ignore if typing in an input field
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        return;
+      }
+
+      // Find and execute matching shortcut
+      const shortcut = shortcuts.find(s => {
+        const keyMatch = s.key.toLowerCase() === e.key.toLowerCase();
+        const ctrlMatch = (s.ctrl || false) === (e.ctrlKey || e.metaKey);
+        const shiftMatch = (s.shift || false) === e.shiftKey;
+        const altMatch = (s.alt || false) === e.altKey;
+        
+        return keyMatch && ctrlMatch && shiftMatch && altMatch;
+      });
+
+      if (shortcut) {
+        e.preventDefault();
+        shortcut.action();
+      }
+
+      // Space + drag handled in canvas for panning
+    };
+
+    const handleKeyUp = (e: KeyboardEvent) => {
+      // Update modifier states
+      setActiveModifiers({
+        shift: e.shiftKey,
+        ctrl: e.ctrlKey || e.metaKey,
+        alt: e.altKey
+      });
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, [shortcuts]);
+
+  return {
+    shortcuts,
+    activeModifiers
+  };
+};
+
+// Export keyboard shortcut categories for help panel
+export const KEYBOARD_SHORTCUT_CATEGORIES = {
+  tool: 'Tool Selection',
+  drawing: 'Drawing Operations',
+  view: 'View Controls',
+  edit: 'Edit Operations'
+};

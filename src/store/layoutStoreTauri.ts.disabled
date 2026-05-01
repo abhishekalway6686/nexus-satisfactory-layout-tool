@@ -1,0 +1,199 @@
+// Enhanced layout store with Tauri integration
+import { create } from 'zustand';
+import { LayoutState } from '../types';
+import { createTauriStoreEnhancer, setupDesktopKeyboardShortcuts } from './tauriStoreAdapter';
+import { isTauriEnvironment } from '../tauri/environment';
+import { HybridCalculations } from '../utils/hybridCalculations';
+import { useLayoutStore as originalStore } from './layoutStore';
+
+// Create enhanced store that wraps the original with Tauri capabilities
+export const useLayoutStoreTauri = create<LayoutState & {
+  // Additional Tauri-specific actions
+  initializeTauri: () => Promise<void>;
+  syncWithBackend: () => Promise<void>;
+  performanceMode: boolean;
+  setPerformanceMode: (enabled: boolean) => void;
+}>((set, get) => {
+  // Get original store instance
+  const baseStore = originalStore.getState();
+  const baseActions = originalStore.getState();
+  
+  // Create Tauri enhancements
+  const tauriEnhancements = createTauriStoreEnhancer(set, get);
+  
+  // Override specific actions with Tauri-aware versions
+  const enhancedActions = {
+    ...baseActions,
+    
+    // Building operations
+    addBuilding: async (building: any) => {
+      if (isTauriEnvironment()) {
+        return await tauriEnhancements.addBuildingWithTauri(building);
+      }
+      return baseActions.addBuilding(building);
+    },
+    
+    updateBuildingPosition: (id: string, x: number, y: number) => {
+      if (isTauriEnvironment()) {
+        tauriEnhancements.updateBuildingPositionWithTauri(id, x, y);
+      } else {
+        baseActions.updateBuildingPosition(id, x, y);
+      }
+    },
+    
+    updateBuildingRotation: (id: string, rotation: number) => {
+      if (isTauriEnvironment()) {
+        tauriEnhancements.updateBuildingRotationWithTauri(id, rotation);
+      } else {
+        baseActions.updateBuildingRotation(id, rotation);
+      }
+    },
+    
+    deleteBuilding: async (id: string) => {
+      if (isTauriEnvironment()) {
+        await tauriEnhancements.deleteBuildingWithTauri(id);
+      } else {
+        baseActions.deleteBuilding(id);
+      }
+    },
+    
+    // File operations
+    saveLayout: async () => {
+      if (isTauriEnvironment()) {
+        return await tauriEnhancements.saveLayoutWithTauri();
+      }
+      
+      // Use original browser-based save
+      const state = get();
+      const data = JSON.stringify({
+        buildings: state.buildings,
+        conveyorSystems: state.conveyorSystems,
+        pipeSystems: state.pipeSystems,
+        railways: state.railways,
+        stickyNotes: state.stickyNotes,
+      });
+      
+      const blob = new Blob([data], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'layout.json';
+      a.click();
+      URL.revokeObjectURL(url);
+    },
+    
+    loadLayout: async () => {
+      if (isTauriEnvironment()) {
+        return await tauriEnhancements.loadLayoutWithTauri();
+      }
+      
+      // Use original browser-based load
+      return new Promise<void>((resolve) => {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.json,.slt';
+        
+        input.onchange = async (e) => {
+          const file = (e.target as HTMLInputElement).files?.[0];
+          if (file) {
+            const text = await file.text();
+            const data = JSON.parse(text);
+            
+            set({
+              buildings: data.buildings || {},
+              conveyorSystems: data.conveyorSystems || {},
+              pipeSystems: data.pipeSystems || {},
+              railways: data.railways || {},
+              stickyNotes: data.stickyNotes || {},
+            });
+            
+            resolve();
+          }
+        };
+        
+        input.click();
+      });
+    },
+    
+    // Tauri-specific actions
+    initializeTauri: async () => {
+      if (!isTauriEnvironment()) return;
+      
+      try {
+        // Initialize Tauri integration
+        const { initializeTauri } = await import('../tauri');
+        await initializeTauri();
+        
+        // Setup keyboard shortcuts
+        setupDesktopKeyboardShortcuts({
+          saveLayoutWithTauri: tauriEnhancements.saveLayoutWithTauri,
+          loadLayoutWithTauri: tauriEnhancements.loadLayoutWithTauri,
+        });
+        
+        // Load initial data from backend
+        await get().syncWithBackend();
+        
+        console.log('Tauri integration initialized');
+      } catch (error) {
+        console.error('Failed to initialize Tauri:', error);
+      }
+    },
+    
+    syncWithBackend: async () => {
+      if (!isTauriEnvironment()) return;
+      
+      try {
+        // Sync all data from Rust backend
+        const { getAllBuildings } = await import('../tauri/commands');
+        const buildings = await getAllBuildings();
+        
+        // Convert from Tauri format to store format
+        const buildingsMap: Record<string, any> = {};
+        buildings.forEach(b => {
+          buildingsMap[b.id] = {
+            id: b.id,
+            type: b.buildingType,
+            x: b.position.x,
+            y: b.position.y,
+            z: b.position.z,
+            rotation: b.rotation,
+            floor: b.floor,
+          };
+        });
+        
+        set({ buildings: buildingsMap });
+      } catch (error) {
+        console.error('Failed to sync with backend:', error);
+      }
+    },
+    
+    performanceMode: true,
+    setPerformanceMode: (enabled: boolean) => {
+      set({ performanceMode: enabled });
+    },
+  };
+  
+  // Return combined store
+  return {
+    ...baseStore,
+    ...enhancedActions,
+  };
+});
+
+// Re-export hybrid calculations as the primary calculation utilities
+export { HybridCalculations as Calculations } from '../utils/hybridCalculations';
+
+// Initialize Tauri on store creation if in Tauri environment
+if (isTauriEnvironment()) {
+  // Set store instance for event handling
+  import('./tauriStoreAdapter').then(({ setStoreInstance }) => {
+    setStoreInstance(useLayoutStoreTauri);
+  });
+  
+  import('../tauri/events').then(({ setStoreInstance }) => {
+    setStoreInstance(useLayoutStoreTauri);
+  });
+  
+  // Initialize Tauri integration
+  useLayoutStoreTauri.getState().initializeTauri();
+}

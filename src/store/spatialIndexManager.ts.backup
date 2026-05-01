@@ -1,0 +1,73 @@
+// src/store/spatialIndexManager.ts
+import { RailwayNode } from '../types';
+import { SpatialGrid } from '../utils/SpatialGrid';
+
+/**
+ * Manages spatial indices for various entity types in the layout.
+ * Currently optimized for railway nodes but can be extended for other entities.
+ */
+export class SpatialIndexManager {
+  private railwayNodeGrid: SpatialGrid<RailwayNode>;
+  
+  constructor() {
+    // Initialize spatial grid with 10-meter cells
+    // This provides a good balance between memory usage and query performance
+    this.railwayNodeGrid = new SpatialGrid<RailwayNode>(10);
+  }
+  
+  /**
+   * Initializes the railway node grid from existing nodes
+   */
+  initializeRailwayNodes(nodes: Record<string, RailwayNode>): void {
+    this.railwayNodeGrid.clear();
+    Object.values(nodes).forEach(node => {
+      this.railwayNodeGrid.insert(node);
+    });
+  }
+  
+  /**
+   * Adds a railway node to the spatial index
+   */
+  addRailwayNode(node: RailwayNode): void {
+    this.railwayNodeGrid.insert(node);
+  }
+  
+  /**
+   * Updates a railway node in the spatial index
+   */
+  updateRailwayNode(node: RailwayNode): void {
+    this.railwayNodeGrid.update(node);
+  }
+  
+  /**
+   * Removes a railway node from the spatial index
+   */
+  removeRailwayNode(nodeId: string): void {
+    this.railwayNodeGrid.remove(nodeId);
+  }
+  
+  /**
+   * Gets the railway node spatial grid
+   */
+  getRailwayNodeGrid(): SpatialGrid<RailwayNode> {
+    return this.railwayNodeGrid;
+  }
+  
+  /**
+   * Clears all spatial indices
+   */
+  clear(): void {
+    this.railwayNodeGrid.clear();
+  }
+  
+  /**
+   * Gets statistics about the spatial indices
+   */
+  getStats(): {
+    railwayNodes: ReturnType<SpatialGrid<RailwayNode>['getStats']>;
+  } {
+    return {
+      railwayNodes: this.railwayNodeGrid.getStats(),
+    };
+  }
+}

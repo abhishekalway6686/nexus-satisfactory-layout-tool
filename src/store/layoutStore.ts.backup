@@ -1,0 +1,2589 @@
+import { create } from 'zustand';
+import { LayoutState, PipeSupport, PipeSegment, Pipeline, RailwayNode, RailwaySegment, Railway, Point3D, Building, RailwayConnectionPoint, ConveyorLift, PipeFloorConnection, ConnectionPoint, Foundation, WallSegment } from '../types';
+import { BUILDING_TYPES, PIPE_MAX_LENGTH, RAILWAY_MAX_LENGTH, BUILDING_RAILWAY_SNAP_THRESHOLD, CONVEYOR_LIFT_BASE_COSTS, CONVEYOR_LIFT_MIN_HEIGHT, CONVEYOR_LIFT_MAX_HEIGHT, FLOOR_HEIGHT, PIPE_FLOOR_CONNECTION_BASE_COSTS, PIPE_FLOOR_CONNECTION_MIN_HEIGHT, PIPE_FLOOR_CONNECTION_MAX_HEIGHT } from '../constants';
+import { 
+  getConnectionPointWorldPos, 
+  getRailwayConnectionPointWorldPos, 
+  distance3D,
+  distance3DSquared,
+  findSegmentsWithBuildingAnchors,
+  recalculateSegmentCurveControlPoints,
+  updateRailwaySegmentMetadata,
+  findAdjacentSegmentsForCurveRecalculation,
+  validateAndRepairRailwayConnections,
+  handleBuildingRotationForRailways
+} from '../utils/helpers';
+import { shouldCreateTurn, calculateCurveControlPoint } from '../logic/common/curveUtils';
+
+// Import modular logic
+import { 
+  startConveyorDrawing, 
+  addPoleToPath, 
+  finishConveyorDrawing, 
+  cancelConveyorDrawing,
+  reverseBeltDirection
+} from '../logic/conveyor';
+import { 
+  startPipeDrawing
+} from '../logic/pipe';
+import { 
+  startRailwayDrawing,
+  addRailwayPoint as addRailwayPointLogic,
+  finishRailwayDrawing as finishRailwayDrawingLogic
+} from '../logic/railway/railwayLogic';
+import {
+  splitSegmentAtPoint,
+  mergeNodes,
+  isValidSnap,
+  getEffectiveSnapThreshold,
+} from '../logic/railway/railwaySnapping';
+import { consolidateProximityNodes } from '../logic/railway/railwayNodeConsolidation';
+import { RAILWAY_SNAP_THRESHOLD } from '../constants';
+import { SpatialIndexManager } from './spatialIndexManager';
+import { detectSnapTargetOptimized } from '../logic/railway/railwaySnappingOptimized';
+
+// Initialize spatial index manager
+const spatialIndexManager = new SpatialIndexManager();
+
+export const useLayoutStore = create<LayoutState>((set, get) => ({
+  buildings: {},
+  conveyorPoles: {},
+  conveyorSegments: {},
+  conveyorBelts: {},
+  conveyorLifts: {},
+  pipeSupports: {},
+  pipeSegments: {},
+  pipelines: {},
+  pipeFloorConnections: {},
+  stickyNotes: {},
+  truckPaths: {},
+  railways: {},
+  railwaySegments: {},
+  railwayNodes: {},
+  foundations: {},
+  wallSegments: {},
+  currentFloor: 0,
+  selectedBuilding: null,
+  selectedPole: null,
+  selectedPipeSupport: null,
+  selectedStickyNote: null,
+  selectedRailwayNode: null,
+  selectedRailwaySegment: null,
+  selectedConveyorLift: null,
+  selectedPipeFloorConnection: null,
+  selectedFoundation: null,
+  selectedWall: null,
+  selectedTool: 'select',
+  drawingState: {
+    isDrawing: false,
+    mode: 'default',
+    currentBeltId: null,
+    startPole: null,
+    currentPath: [],
+    startBuildingId: undefined,
+    startConnectionPoint: undefined,
+    drawingRailway: false,
+    currentRailwayId: undefined,
+    railwayStartNode: undefined,
+    railwayPath: [],
+    railwayStartStation: undefined,
+    railwayStartRailPoint: undefined,
+    drawingPipe: false,
+    currentPipelineId: undefined,
+    pipeStartSupport: null,
+    pipePath: [],
+    pipeStartBuildingId: undefined,
+    pipeStartConnectionPoint: undefined,
+    drawingConveyorLift: false,
+    conveyorLiftStartFloor: undefined,
+    conveyorLiftEndFloor: undefined,
+    currentConveyorLiftId: undefined,
+    drawingPipeFloorConnection: false,
+    pipeFloorConnectionStartFloor: undefined,
+    pipeFloorConnectionEndFloor: undefined,
+    currentPipeFloorConnectionId: undefined,
+    drawingFoundation: false,
+    foundationStartPoint: undefined,
+    currentFoundationId: undefined,
+    drawingWall: false,
+    wallStartPoint: undefined,
+    wallSegments: [],
+    currentWallId: undefined,
+    wallHeight: 4,
+  },
+  showGrid: true,
+  showFloorBelow: true,
+  conveyorMode: 'default',
+  buildingPanelWidth: 350,
+  propertiesPanelWidth: 400,
+  collapsedCategories: new Set(['extraction', 'power', 'storage', 'special', 'workstations', 'transport', 'infrastructure', 'architecture']),
+  mobileConstraintMode: 'none',
+
+  addBuilding: (building) => set((state) => ({
+    buildings: { ...state.buildings, [building.id]: building },
+  })),
+
+  updateBuilding: (id, updates) => set((state) => {
+    const newBuildings = {
+      ...state.buildings,
+      [id]: { ...state.buildings[id], ...updates },
+    };
+
+    // If building position or rotation changed, update connected conveyor anchor poles, pipe anchor supports, and railway segments
+    if ((updates.x !== undefined || updates.y !== undefined || updates.rotation !== undefined) && state.buildings[id]) {
+      const building = state.buildings[id];
+      const buildingDef = BUILDING_TYPES[building.type];
+      const newBelts = { ...state.conveyorBelts };
+      const newPoles = { ...state.conveyorPoles };
+      const newPipelines = { ...state.pipelines };
+      const newPipeSupports = { ...state.pipeSupports };
+      const newRailways = { ...state.railways };
+      const newRailwaySegments = { ...state.railwaySegments };
+      const newRailwayNodes = { ...state.railwayNodes };
+
+      // Update anchor poles for conveyors
+      Object.values(newBelts).forEach((belt) => {
+        if (belt.fromBuildingId === id && belt.fromConnectionPoint) {
+          const connectionPoint = buildingDef.connectionPoints.find((cp) => cp.id === belt.fromConnectionPoint);
+          if (connectionPoint) {
+            const worldPos = getConnectionPointWorldPos(newBuildings[id], buildingDef, connectionPoint);
+            const anchorPoleId = `pole-anchor-${id}-${belt.fromConnectionPoint}`;
+            if (newPoles[anchorPoleId]) {
+              newPoles[anchorPoleId] = {
+                ...newPoles[anchorPoleId],
+                x: worldPos.x,
+                y: worldPos.y,
+                z: worldPos.z,
+              };
+            }
+          }
+        }
+
+        if (belt.toBuildingId === id && belt.toConnectionPoint) {
+          const connectionPoint = buildingDef.connectionPoints.find((cp) => cp.id === belt.toConnectionPoint);
+          if (connectionPoint) {
+            const worldPos = getConnectionPointWorldPos(newBuildings[id], buildingDef, connectionPoint);
+            const anchorPoleId = `pole-anchor-end-${id}-${belt.toConnectionPoint}`;
+            if (newPoles[anchorPoleId]) {
+              newPoles[anchorPoleId] = {
+                ...newPoles[anchorPoleId],
+                x: worldPos.x,
+                y: worldPos.y,
+                z: worldPos.z,
+              };
+            }
+          }
+        }
+      });
+
+      // Update anchor supports for pipes
+      Object.values(newPipelines).forEach((pipeline) => {
+        if (pipeline.fromBuildingId === id && pipeline.fromConnectionPoint) {
+          const connectionPoint = buildingDef.connectionPoints.find((cp) => cp.id === pipeline.fromConnectionPoint);
+          if (connectionPoint) {
+            const worldPos = getConnectionPointWorldPos(newBuildings[id], buildingDef, connectionPoint);
+            const anchorSupportId = `support-anchor-${id}-${pipeline.fromConnectionPoint}`;
+            if (newPipeSupports[anchorSupportId]) {
+              newPipeSupports[anchorSupportId] = {
+                ...newPipeSupports[anchorSupportId],
+                x: worldPos.x,
+                y: worldPos.y,
+                z: worldPos.z,
+              };
+            }
+          }
+        }
+
+        if (pipeline.toBuildingId === id && pipeline.toConnectionPoint) {
+          const connectionPoint = buildingDef.connectionPoints.find((cp) => cp.id === pipeline.toConnectionPoint);
+          if (connectionPoint) {
+            const worldPos = getConnectionPointWorldPos(newBuildings[id], buildingDef, connectionPoint);
+            const anchorSupportId = `support-anchor-end-${id}-${pipeline.toConnectionPoint}`;
+            if (newPipeSupports[anchorSupportId]) {
+              newPipeSupports[anchorSupportId] = {
+                ...newPipeSupports[anchorSupportId],
+                x: worldPos.x,
+                y: worldPos.y,
+                z: worldPos.z,
+              };
+            }
+          }
+        }
+      });
+
+      // Update railway anchor nodes connected to this building
+      Object.values(newRailwayNodes).forEach((node) => {
+        if (node.isAnchor && node.id.startsWith(`rail-anchor-${id}-`)) {
+          const railPointId = node.id.split('-')[3]; // Extract railPointId from anchor id
+          const railPoint = buildingDef.railwayPoints?.find((rp) => rp.id === railPointId);
+          if (railPoint) {
+            const worldPos = getRailwayConnectionPointWorldPos(newBuildings[id], buildingDef, railPoint);
+            newRailwayNodes[node.id] = {
+              ...node,
+              x: worldPos.x,
+              y: worldPos.y,
+              z: worldPos.z,
+            };
+          }
+        }
+      });
+
+      // Find all segments that have anchor nodes connected to this building
+      const connectedSegmentsInfo = findSegmentsWithBuildingAnchors(id, newRailwaySegments, newRailwayNodes);
+      const connectedSegmentIds = Object.keys(connectedSegmentsInfo);
+      
+      // Update segments directly connected to this building
+      connectedSegmentIds.forEach((segmentId) => {
+        const segment = newRailwaySegments[segmentId];
+        
+        if (segment) {
+          const startNode = newRailwayNodes[segment.startNode];
+          const endNode = newRailwayNodes[segment.endNode];
+          
+          if (startNode && endNode) {
+            // Update basic segment properties
+            newRailwaySegments[segmentId] = {
+              ...segment,
+              startPoint: { x: startNode.x, y: startNode.y, z: startNode.z },
+              endPoint: { x: endNode.x, y: endNode.y, z: endNode.z },
+              length: distance3D(startNode, endNode),
+            };
+            
+            // Recalculate curve control points if this is a curved segment
+            if (segment.type === 'curve') {
+              const updatedSegment = recalculateSegmentCurveControlPoints(
+                segmentId,
+                newRailwaySegments,
+                newRailwayNodes,
+                newRailways
+              );
+              
+              if (updatedSegment) {
+                newRailwaySegments[segmentId] = updatedSegment;
+              }
+            }
+          }
+        }
+      });
+      
+      // Find and update adjacent segments that might need curve recalculation
+      const adjacentSegmentIds = findAdjacentSegmentsForCurveRecalculation(
+        id, 
+        newRailwaySegments, 
+        newRailwayNodes, 
+        newRailways
+      );
+      
+      adjacentSegmentIds.forEach((segmentId) => {
+        // Skip if we already processed this segment
+        if (connectedSegmentIds.includes(segmentId)) return;
+        
+        const segment = newRailwaySegments[segmentId];
+        if (segment && segment.type === 'curve') {
+          const updatedSegment = recalculateSegmentCurveControlPoints(
+            segmentId,
+            newRailwaySegments,
+            newRailwayNodes,
+            newRailways
+          );
+          
+          if (updatedSegment) {
+            newRailwaySegments[segmentId] = updatedSegment;
+          }
+        }
+      });
+      
+      // Update metadata for segments that reference this building
+      const updatedMetadataSegments = updateRailwaySegmentMetadata(id, newRailwaySegments, newRailwayNodes);
+      Object.assign(newRailwaySegments, updatedMetadataSegments);
+      
+      // Validate and repair railway connections after the update
+      const validationResult = validateAndRepairRailwayConnections(id, newRailwaySegments, newRailwayNodes, newRailways);
+      Object.assign(newRailwaySegments, validationResult.repairedSegments);
+      
+      // Log any validation errors for debugging
+      if (validationResult.validationErrors.length > 0) {
+        console.warn('Railway validation errors after building update:', validationResult.validationErrors);
+      }
+
+      return {
+        buildings: newBuildings,
+        conveyorPoles: newPoles,
+        conveyorBelts: newBelts,
+        pipeSupports: newPipeSupports,
+        pipelines: newPipelines,
+        railways: newRailways,
+        railwaySegments: newRailwaySegments,
+        railwayNodes: newRailwayNodes,
+      };
+    }
+
+    return { buildings: newBuildings };
+  }),
+
+  deleteBuilding: (id) => set((state) => {
+    const newBuildings = { ...state.buildings };
+    const newBelts = { ...state.conveyorBelts };
+    const newPoles = { ...state.conveyorPoles };
+    const newSegments = { ...state.conveyorSegments };
+    const newPipelines = { ...state.pipelines };
+    const newPipeSupports = { ...state.pipeSupports };
+    const newPipeSegments = { ...state.pipeSegments };
+    const newRailways = { ...state.railways };
+    const newRailwaySegments = { ...state.railwaySegments };
+    const newRailwayNodes = { ...state.railwayNodes };
+
+    delete newBuildings[id];
+
+    // Remove related belts and their poles/segments
+    Object.entries(newBelts).forEach(([beltId, belt]) => {
+      if (belt.fromBuildingId === id || belt.toBuildingId === id) {
+        belt.segments.forEach((segId) => delete newSegments[segId]);
+        Object.values(newSegments)
+          .filter((seg) => belt.segments.includes(seg.id))
+          .forEach((seg) => {
+            const startPole = newPoles[seg.startPole];
+            const endPole = newPoles[seg.endPole];
+            if (startPole && !startPole.isAnchor) delete newPoles[seg.startPole];
+            if (endPole && !endPole.isAnchor) delete newPoles[seg.endPole];
+          });
+        delete newBelts[beltId];
+      }
+    });
+
+    // Remove related pipelines and their supports/segments
+    Object.entries(newPipelines).forEach(([pipelineId, pipeline]) => {
+      if (pipeline.fromBuildingId === id || pipeline.toBuildingId === id) {
+        pipeline.segments.forEach((segId) => delete newPipeSegments[segId]);
+        Object.values(newPipeSegments)
+          .filter((seg) => pipeline.segments.includes(seg.id))
+          .forEach((seg) => {
+            const startSupport = newPipeSupports[seg.startSupport];
+            const endSupport = newPipeSupports[seg.endSupport];
+            if (startSupport && !startSupport.isAnchor) delete newPipeSupports[seg.startSupport];
+            if (endSupport && !endSupport.isAnchor) delete newPipeSupports[seg.endSupport];
+          });
+        delete newPipelines[pipelineId];
+      }
+    });
+
+    // Remove related railways and their segments
+    Object.entries(newRailways).forEach(([railwayId, railway]) => {
+      if (railway.stations.includes(id)) {
+        // Remove segments connected to this building
+        railway.segments.forEach((segId) => {
+          const segment = newRailwaySegments[segId];
+          if (segment && (segment.fromStation === id || segment.toStation === id)) {
+            // Delete anchor nodes
+            if (segment.fromStation === id) {
+              const anchorId = `rail-anchor-${id}-${segment.fromRailPoint}`;
+              if (newRailwayNodes[anchorId]) delete newRailwayNodes[anchorId];
+            }
+            if (segment.toStation === id) {
+              const anchorId = `rail-anchor-${id}-${segment.toRailPoint}`;
+              if (newRailwayNodes[anchorId]) delete newRailwayNodes[anchorId];
+            }
+            delete newRailwaySegments[segId];
+          }
+        });
+
+        // Update railway to remove this station and its segments
+        const updatedRailway = {
+          ...railway,
+          stations: railway.stations.filter((stationId) => stationId !== id),
+          segments: railway.segments.filter((segId) => {
+            const segment = newRailwaySegments[segId];
+            return segment && segment.fromStation !== id && segment.toStation !== id;
+          }),
+        };
+
+        // If railway has no stations left, delete it
+        if (updatedRailway.stations.length === 0 || updatedRailway.segments.length === 0) {
+          delete newRailways[railwayId];
+        } else {
+          newRailways[railwayId] = updatedRailway;
+        }
+      }
+    });
+
+    return {
+      buildings: newBuildings,
+      conveyorBelts: newBelts,
+      conveyorPoles: newPoles,
+      conveyorSegments: newSegments,
+      pipelines: newPipelines,
+      pipeSupports: newPipeSupports,
+      pipeSegments: newPipeSegments,
+      railways: newRailways,
+      railwaySegments: newRailwaySegments,
+      railwayNodes: newRailwayNodes,
+      selectedBuilding: state.selectedBuilding === id ? null : state.selectedBuilding,
+    };
+  }),
+
+  rotateBuilding: (id) => {
+    const state = get();
+    const building = state.buildings[id];
+    if (!building) return;
+
+    const rotations: Array<0 | 90 | 180 | 270> = [0, 90, 180, 270];
+    const currentIndex = rotations.indexOf(building.rotation);
+    const newRotation = rotations[(currentIndex + 1) % 4];
+
+    // Update building with new rotation
+    const newBuildings = {
+      ...state.buildings,
+      [id]: { ...building, rotation: newRotation },
+    };
+
+    // Handle railway-specific rotation updates
+    const railwayResult = handleBuildingRotationForRailways(
+      id,
+      newRotation,
+      state.railwaySegments,
+      state.railwayNodes,
+      state.railways,
+      newBuildings
+    );
+
+    // Use updateBuilding to handle all other complex updates (conveyors, pipes, etc.)
+    set({
+      buildings: newBuildings,
+      railwaySegments: railwayResult.updatedSegments,
+      railwayNodes: railwayResult.updatedNodes,
+    });
+
+    // Call updateBuilding without rotation change to handle conveyors and pipes
+    get().updateBuilding(id, { x: building.x, y: building.y });
+  },
+
+  addPole: (pole) => set((state) => ({
+    conveyorPoles: { ...state.conveyorPoles, [pole.id]: pole },
+  })),
+
+  updatePole: (id, updates) => set((state) => {
+    const newPoles = {
+      ...state.conveyorPoles,
+      [id]: { ...state.conveyorPoles[id], ...updates },
+    };
+
+    // Update connected conveyor segments
+    const newSegments = { ...state.conveyorSegments };
+    Object.values(newSegments).forEach((segment) => {
+      if (segment.startPole === id || segment.endPole === id) {
+        const startPole = newPoles[segment.startPole];
+        const endPole = newPoles[segment.endPole];
+        if (startPole && endPole) {
+          newSegments[segment.id] = {
+            ...segment,
+            length: distance3D(startPole, endPole),
+          };
+        }
+      }
+    });
+
+    return {
+      conveyorPoles: newPoles,
+      conveyorSegments: newSegments,
+    };
+  }),
+
+  deletePole: (id) => set((state) => {
+    const newPoles = { ...state.conveyorPoles };
+    const newSegments = { ...state.conveyorSegments };
+    const newBelts = { ...state.conveyorBelts };
+
+    // Find and remove segments connected to this pole
+    Object.entries(newSegments).forEach(([segId, segment]) => {
+      if (segment.startPole === id || segment.endPole === id) {
+        delete newSegments[segId];
+
+        // Remove segment from belts
+        Object.values(newBelts).forEach((belt) => {
+          belt.segments = belt.segments.filter((s) => s !== segId);
+        });
+      }
+    });
+
+    // Remove empty belts
+    Object.entries(newBelts).forEach(([beltId, belt]) => {
+      if (belt.segments.length === 0) {
+        delete newBelts[beltId];
+      }
+    });
+
+    delete newPoles[id];
+
+    return {
+      conveyorPoles: newPoles,
+      conveyorSegments: newSegments,
+      conveyorBelts: newBelts,
+      selectedPole: state.selectedPole === id ? null : state.selectedPole,
+    };
+  }),
+
+  addPipeSupport: (support) => set((state) => {
+    console.log('addPipeSupport called with:', support);
+    const newSupports = { ...state.pipeSupports, [support.id]: support };
+
+    // If we're in pipe drawing mode, add the support to the path
+    if (state.drawingState.drawingPipe) {
+      const newPath = [...(state.drawingState.pipePath ?? []), support];
+      console.log('Adding support to pipe path. New path length:', newPath.length);
+
+      return {
+        pipeSupports: newSupports,
+        drawingState: {
+          ...state.drawingState,
+          pipePath: newPath,
+        },
+      };
+    }
+
+    return { pipeSupports: newSupports };
+  }),
+
+  updatePipeSupport: (id, updates) => set((state) => {
+    const newSupports = {
+      ...state.pipeSupports,
+      [id]: { ...state.pipeSupports[id], ...updates },
+    };
+
+    // Update connected pipe segments
+    const newSegments = { ...state.pipeSegments };
+    Object.values(newSegments).forEach((segment) => {
+      if (segment.startSupport === id || segment.endSupport === id) {
+        const startSupport = newSupports[segment.startSupport];
+        const endSupport = newSupports[segment.endSupport];
+        if (startSupport && endSupport) {
+          const newLength = distance3D(startSupport, endSupport);
+          const headLift = Math.abs(endSupport.z - startSupport.z);
+          newSegments[segment.id] = {
+            ...segment,
+            length: newLength,
+            headLift: headLift > 0 ? headLift : undefined,
+          };
+        }
+      }
+    });
+
+    return {
+      pipeSupports: newSupports,
+      pipeSegments: newSegments,
+    };
+  }),
+
+  deletePipeSupport: (id) => set((state) => {
+    console.log('deletePipeSupport called with:', id);
+    const newSupports = { ...state.pipeSupports };
+    const newSegments = { ...state.pipeSegments };
+    const newPipelines = { ...state.pipelines };
+
+    // Find and remove segments connected to this support
+    Object.entries(newSegments).forEach(([segId, segment]) => {
+      if (segment.startSupport === id || segment.endSupport === id) {
+        delete newSegments[segId];
+
+        // Remove segment from pipelines
+        Object.values(newPipelines).forEach((pipeline) => {
+          pipeline.segments = pipeline.segments.filter((s) => s !== segId);
+        });
+      }
+    });
+
+    // Remove empty pipelines
+    Object.entries(newPipelines).forEach(([pipelineId, pipeline]) => {
+      if (pipeline.segments.length === 0) {
+        delete newPipelines[pipelineId];
+      }
+    });
+
+    delete newSupports[id];
+
+    return {
+      pipeSupports: newSupports,
+      pipeSegments: newSegments,
+      pipelines: newPipelines,
+      selectedPipeSupport: state.selectedPipeSupport === id ? null : state.selectedPipeSupport,
+    };
+  }),
+
+  addStickyNote: (note) => set((state) => ({
+    stickyNotes: { ...state.stickyNotes, [note.id]: note },
+  })),
+
+  updateStickyNote: (id, updates) => set((state) => ({
+    stickyNotes: {
+      ...state.stickyNotes,
+      [id]: { ...state.stickyNotes[id], ...updates },
+    },
+  })),
+
+  deleteStickyNote: (id) => set((state) => {
+    const newStickyNotes = { ...state.stickyNotes };
+    delete newStickyNotes[id];
+    return {
+      stickyNotes: newStickyNotes,
+      selectedStickyNote: state.selectedStickyNote === id ? null : state.selectedStickyNote,
+    };
+  }),
+
+  startConveyorDrawing: (buildingId, connectionPointId, poleId, liftId, liftConnectionPointId) => {
+    const state = get();
+    
+    const result = startConveyorDrawing(
+      state.buildings,
+      state.conveyorPoles,
+      state.conveyorLifts,
+      state.currentFloor,
+      buildingId,
+      connectionPointId,
+      poleId,
+      liftId,
+      liftConnectionPointId
+    );
+
+    if (result.drawingState.isDrawing) {
+      set({
+        conveyorPoles: result.poles,
+        drawingState: {
+          ...state.drawingState,
+          ...result.drawingState,
+          mode: state.conveyorMode,
+        },
+      });
+    }
+  },
+
+  addPoleToPath: (pole) => {
+    const state = get();
+    if (!state.drawingState.isDrawing || !state.drawingState.startPole) {
+      return;
+    }
+
+    const result = addPoleToPath(pole, state.drawingState as any, state.conveyorPoles);
+    
+    set({
+      conveyorPoles: result.poles,
+      drawingState: {
+        ...state.drawingState,
+        ...result.drawingState,
+      },
+    });
+  },
+
+  finishConveyorDrawing: (buildingId, connectionPointId, poleId, liftId, liftConnectionPointId) => {
+    const state = get();
+
+    const result = finishConveyorDrawing(
+      state.drawingState as any,
+      state.conveyorPoles,
+      state.conveyorSegments,
+      state.conveyorBelts,
+      state.buildings,
+      state.conveyorLifts,
+      state.currentFloor,
+      state.conveyorMode,
+      buildingId,
+      connectionPointId,
+      poleId,
+      liftId,
+      liftConnectionPointId
+    );
+
+    if (result) {
+      set({
+        conveyorPoles: result.poles,
+        conveyorSegments: result.segments,
+        conveyorBelts: result.belts,
+        drawingState: {
+          ...state.drawingState,
+          ...result.drawingState,
+        },
+      });
+    }
+  },
+
+  cancelDrawing: () => {
+    const state = get();
+    
+    const result = cancelConveyorDrawing(state.drawingState as any, state.conveyorPoles);
+    
+    set({
+      conveyorPoles: result.poles,
+      drawingState: {
+        ...state.drawingState,
+        ...result.drawingState,
+        drawingFoundation: false,
+        foundationStartPoint: undefined,
+        currentFoundationId: undefined,
+        drawingWall: false,
+        wallStartPoint: undefined,
+        wallSegments: [],
+        currentWallId: undefined,
+      },
+    });
+  },
+
+  reverseBeltDirection: (beltId) => set((state) => ({
+    conveyorBelts: reverseBeltDirection(beltId, state.conveyorBelts),
+  })),
+
+  startPipeDrawing: (buildingId, connectionPointId, supportId) => {
+    const state = get();
+    
+    const result = startPipeDrawing(
+      state.buildings,
+      state.pipeSupports,
+      buildingId,
+      connectionPointId,
+      supportId
+    );
+
+    if (result.drawingState.drawingPipe) {
+      set({
+        pipeSupports: result.supports,
+        drawingState: {
+          ...state.drawingState,
+          ...result.drawingState,
+        },
+      });
+    }
+  },
+
+  addPipeSupportToPath: (support: PipeSupport) => {
+    set((state) => {
+      if (!state.drawingState.drawingPipe || !state.drawingState.pipeStartSupport) {
+        return state;
+      }
+
+      const newSupports = { ...state.pipeSupports, [support.id]: support };
+      const newPath = [...(state.drawingState.pipePath ?? []), support];
+
+      return {
+        pipeSupports: newSupports,
+        drawingState: {
+          ...state.drawingState,
+          pipePath: newPath,
+        },
+      };
+    });
+  },
+
+  finishPipeDrawing: (buildingId, connectionPointId, supportId) => {
+    const state = get();
+
+    if (!state.drawingState.drawingPipe || !state.drawingState.currentPipelineId || (state.drawingState.pipePath ?? []).length < 1) {
+      return;
+    }
+
+    let endSupport: PipeSupport | null = null;
+    let shouldAddEndSupport = false;
+    const newSupports = { ...state.pipeSupports };
+    const newSegments = { ...state.pipeSegments };
+
+    if (buildingId && connectionPointId) {
+      const building = state.buildings[buildingId];
+      const buildingDef = BUILDING_TYPES[building.type];
+      const connectionPoint = buildingDef.connectionPoints.find((cp) => cp.id === connectionPointId);
+
+      if (building && buildingDef && connectionPoint && connectionPoint.isFluid) {
+        const worldPos = getConnectionPointWorldPos(building, buildingDef, connectionPoint);
+        const anchorSupportId = `support-anchor-end-${buildingId}-${connectionPointId}`;
+        endSupport = {
+          id: anchorSupportId,
+          x: worldPos.x,
+          y: worldPos.y,
+          z: worldPos.z,
+          floor: building.floor,
+          isAnchor: true,
+        };
+        shouldAddEndSupport = true;
+        newSupports[endSupport.id] = endSupport;
+      }
+    } else if (supportId) {
+      endSupport = state.pipeSupports[supportId];
+      if (endSupport && endSupport.id === state.drawingState.pipeStartSupport?.id) {
+        console.log('ERROR: Cannot end on the same support we started with');
+        return;
+      }
+    } else {
+      if ((state.drawingState.pipePath ?? []).length >= 2) {
+        endSupport = (state.drawingState.pipePath ?? [])[(state.drawingState.pipePath ?? []).length - 1];
+      } else {
+        console.log('ERROR: Need at least 2 supports to create a pipeline');
+        return;
+      }
+    }
+
+    if (!endSupport) {
+      return;
+    }
+
+    const finalPath = [...(state.drawingState.pipePath ?? [])];
+    if (shouldAddEndSupport || endSupport.id !== finalPath[finalPath.length - 1]?.id) {
+      finalPath.push(endSupport);
+    }
+
+    if (finalPath.length < 2) {
+      console.log('ERROR: Need at least 2 supports to create segments');
+      return;
+    }
+
+    const segmentIds: string[] = [];
+
+    for (let i = 0; i < finalPath.length - 1; i++) {
+      const startSupport = finalPath[i];
+      const endSupport = finalPath[i + 1];
+      const segmentLength = distance3D(startSupport, endSupport);
+
+      if (segmentLength < 0.5 || segmentLength > PIPE_MAX_LENGTH) {
+        console.log(`ERROR: Invalid segment length: ${segmentLength}m`);
+        continue;
+      }
+
+      let segmentType: 'straight' | 'turn' | 'incline' | 'vertical' = 'straight';
+      let controlPoints: Point3D[] | undefined;
+      let headLift: number | undefined;
+
+      if (startSupport.z !== endSupport.z) {
+        segmentType = Math.abs(endSupport.z - startSupport.z) > 0.1 ? 'vertical' : 'incline';
+        headLift = Math.abs(endSupport.z - startSupport.z);
+      } else if (i > 0) {
+        const prevSupport = finalPath[i - 1];
+        if (shouldCreateTurn(prevSupport, startSupport, endSupport)) {
+          segmentType = 'turn';
+          const cp = calculateCurveControlPoint(prevSupport, startSupport, endSupport);
+          controlPoints = [cp];
+        }
+      }
+
+      const segment: PipeSegment = {
+        id: `pipe-segment-${Date.now()}-${i}`,
+        type: segmentType,
+        startSupport: startSupport.id,
+        endSupport: endSupport.id,
+        controlPoints,
+        length: segmentLength,
+        headLift,
+      };
+
+      newSegments[segment.id] = segment;
+      segmentIds.push(segment.id);
+    }
+
+    if (segmentIds.length === 0) {
+      return;
+    }
+
+    const pipeline: Pipeline = {
+      id: state.drawingState.currentPipelineId,
+      segments: segmentIds,
+      fromBuildingId: state.drawingState.pipeStartBuildingId,
+      fromConnectionPoint: state.drawingState.pipeStartConnectionPoint,
+      toBuildingId: buildingId,
+      toConnectionPoint: connectionPointId,
+      floor: state.currentFloor,
+      mark: 1,
+    };
+
+    set({
+      pipeSupports: newSupports,
+      pipeSegments: newSegments,
+      pipelines: { ...state.pipelines, [pipeline.id]: pipeline },
+      drawingState: {
+        ...state.drawingState,
+        drawingPipe: false,
+        currentPipelineId: undefined,
+        pipeStartSupport: null,
+        pipePath: [],
+        pipeStartBuildingId: undefined,
+        pipeStartConnectionPoint: undefined,
+      },
+    });
+  },
+
+  cancelPipeDrawing: () => {
+    set((state) => {
+      const newSupports = { ...state.pipeSupports };
+      (state.drawingState.pipePath ?? []).forEach((support) => {
+        if (!support.isAnchor && newSupports[support.id]) {
+          delete newSupports[support.id];
+        }
+      });
+
+      return {
+        pipeSupports: newSupports,
+        drawingState: {
+          ...state.drawingState,
+          drawingPipe: false,
+          currentPipelineId: undefined,
+          pipeStartSupport: null,
+          pipePath: [],
+          pipeStartBuildingId: undefined,
+          pipeStartConnectionPoint: undefined,
+        },
+      };
+    });
+  },
+
+  // Conveyor lift actions
+  startConveyorLiftDrawing: (_x: number, _y: number, startFloor: number) => {
+    const id = `lift_${Date.now()}`;
+    set((state) => ({
+      drawingState: {
+        ...state.drawingState,
+        drawingConveyorLift: true,
+        conveyorLiftStartFloor: startFloor,
+        currentConveyorLiftId: id,
+      },
+    }));
+  },
+
+  finishConveyorLiftDrawing: (endFloor: number, mark: 1 | 2 | 3 | 4 | 5 | 6, direction: 'up' | 'down') => {
+    const state = get();
+    const { drawingState } = state;
+    
+    if (!drawingState.drawingConveyorLift || !drawingState.currentConveyorLiftId || drawingState.conveyorLiftStartFloor === undefined) {
+      return;
+    }
+
+    const startFloor = drawingState.conveyorLiftStartFloor;
+    const height = Math.abs(endFloor - startFloor) * FLOOR_HEIGHT;
+    
+    // Validate height constraints
+    if (height < CONVEYOR_LIFT_MIN_HEIGHT || height > CONVEYOR_LIFT_MAX_HEIGHT) {
+      console.warn(`Invalid conveyor lift height: ${height}m. Must be between ${CONVEYOR_LIFT_MIN_HEIGHT}m and ${CONVEYOR_LIFT_MAX_HEIGHT}m`);
+      return;
+    }
+
+    // Calculate cost based on height and tier
+    const baseCost = CONVEYOR_LIFT_BASE_COSTS[mark];
+    const cost = baseCost * (Math.ceil(height / 2) * 2); // Round up to even meters
+
+    const bottomFloor = Math.min(startFloor, endFloor);
+    const topFloor = Math.max(startFloor, endFloor);
+
+    // Create connection points based on direction
+    // For a 3x3m lift, position connection points at the edges
+    const connectionPoints: ConnectionPoint[] = [];
+    
+    // Start floor connection (bottom for UP, top for DOWN)
+    connectionPoints.push({
+      id: 'start-floor',
+      x: 0, // Center of lift
+      y: direction === 'up' ? 1.5 : -1.5, // Edge of 3x3m lift
+      type: direction === 'up' ? 'input' : 'output',
+      side: direction === 'up' ? 'back' : 'front',
+      isFluid: false
+    });
+    
+    // End floor connection (top for UP, bottom for DOWN)
+    connectionPoints.push({
+      id: 'end-floor',
+      x: 0, // Center of lift
+      y: direction === 'up' ? -1.5 : 1.5, // Edge of 3x3m lift
+      type: direction === 'up' ? 'output' : 'input',
+      side: direction === 'up' ? 'front' : 'back',
+      isFluid: false
+    });
+
+    const conveyorLift: ConveyorLift = {
+      id: drawingState.currentConveyorLiftId,
+      x: 0, // Will be set by the drawing preview component
+      y: 0, // Will be set by the drawing preview component
+      startFloor: bottomFloor,
+      endFloor: topFloor,
+      mark,
+      direction,
+      height,
+      cost,
+      connectionPoints,
+    };
+
+    set((state) => ({
+      conveyorLifts: {
+        ...state.conveyorLifts,
+        [conveyorLift.id]: conveyorLift,
+      },
+      drawingState: {
+        ...state.drawingState,
+        drawingConveyorLift: false,
+        conveyorLiftStartFloor: undefined,
+        conveyorLiftEndFloor: undefined,
+        currentConveyorLiftId: undefined,
+      },
+    }));
+  },
+
+  cancelConveyorLiftDrawing: () => {
+    set((state) => ({
+      drawingState: {
+        ...state.drawingState,
+        drawingConveyorLift: false,
+        conveyorLiftStartFloor: undefined,
+        conveyorLiftEndFloor: undefined,
+        currentConveyorLiftId: undefined,
+      },
+    }));
+  },
+
+  addConveyorLift: (lift: ConveyorLift) => {
+    set((state) => ({
+      conveyorLifts: {
+        ...state.conveyorLifts,
+        [lift.id]: lift,
+      },
+    }));
+  },
+
+  updateConveyorLift: (id: string, updates: Partial<ConveyorLift>) => {
+    set((state) => ({
+      conveyorLifts: {
+        ...state.conveyorLifts,
+        [id]: { ...state.conveyorLifts[id], ...updates },
+      },
+    }));
+  },
+
+  deleteConveyorLift: (id: string) => {
+    set((state) => {
+      const newLifts = { ...state.conveyorLifts };
+      delete newLifts[id];
+      return { conveyorLifts: newLifts };
+    });
+  },
+
+  // Pipe floor connection actions
+  startPipeFloorConnectionDrawing: (_x: number, _y: number, startFloor: number) => {
+    const id = `pipe_floor_${Date.now()}`;
+    set((state) => ({
+      drawingState: {
+        ...state.drawingState,
+        drawingPipeFloorConnection: true,
+        pipeFloorConnectionStartFloor: startFloor,
+        currentPipeFloorConnectionId: id,
+      },
+    }));
+  },
+
+  finishPipeFloorConnectionDrawing: (endFloor: number, mark: 1 | 2, direction: 'up' | 'down') => {
+    const state = get();
+    const { drawingState } = state;
+    
+    if (!drawingState.drawingPipeFloorConnection || !drawingState.currentPipeFloorConnectionId || drawingState.pipeFloorConnectionStartFloor === undefined) {
+      return;
+    }
+
+    const startFloor = drawingState.pipeFloorConnectionStartFloor;
+    const height = Math.abs(endFloor - startFloor) * FLOOR_HEIGHT;
+    
+    // Validate height constraints
+    if (height < PIPE_FLOOR_CONNECTION_MIN_HEIGHT || height > PIPE_FLOOR_CONNECTION_MAX_HEIGHT) {
+      console.warn(`Pipe floor connection height ${height}m is outside valid range (${PIPE_FLOOR_CONNECTION_MIN_HEIGHT}-${PIPE_FLOOR_CONNECTION_MAX_HEIGHT}m)`);
+      return;
+    }
+
+    // Calculate cost based on height and mark
+    const baseCost = PIPE_FLOOR_CONNECTION_BASE_COSTS[mark];
+    const cost = baseCost * Math.ceil(height / 2); // Cost per 2m height segment
+
+    // Determine bottom and top floors (always bottom to top regardless of direction)
+    const bottomFloor = Math.min(startFloor, endFloor);
+    const topFloor = Math.max(startFloor, endFloor);
+
+    // Connection point types based on direction
+    const bottomType = direction === 'up' ? 'input' : 'output';
+    const topType = direction === 'up' ? 'output' : 'input';
+
+    const pipeFloorConnection: PipeFloorConnection = {
+      id: drawingState.currentPipeFloorConnectionId,
+      x: 0, // Will be set by the drawing preview component
+      y: 0, // Will be set by the drawing preview component
+      startFloor: bottomFloor,
+      endFloor: topFloor,
+      mark,
+      direction,
+      height,
+      cost,
+      bottomConnectionPoint: {
+        id: `${drawingState.currentPipeFloorConnectionId}_bottom`,
+        x: 0, // Relative to connection position
+        y: 1, // 1 meter offset for connection
+        type: bottomType,
+        isFluid: true,
+      },
+      topConnectionPoint: {
+        id: `${drawingState.currentPipeFloorConnectionId}_top`,
+        x: 0, // Relative to connection position
+        y: -1, // -1 meter offset for connection
+        type: topType,
+        isFluid: true,
+      },
+    };
+
+    set((state) => ({
+      pipeFloorConnections: {
+        ...state.pipeFloorConnections,
+        [pipeFloorConnection.id]: pipeFloorConnection,
+      },
+      drawingState: {
+        ...state.drawingState,
+        drawingPipeFloorConnection: false,
+        pipeFloorConnectionStartFloor: undefined,
+        pipeFloorConnectionEndFloor: undefined,
+        currentPipeFloorConnectionId: undefined,
+      },
+    }));
+  },
+
+  cancelPipeFloorConnectionDrawing: () => {
+    set((state) => ({
+      drawingState: {
+        ...state.drawingState,
+        drawingPipeFloorConnection: false,
+        pipeFloorConnectionStartFloor: undefined,
+        pipeFloorConnectionEndFloor: undefined,
+        currentPipeFloorConnectionId: undefined,
+      },
+    }));
+  },
+
+  addPipeFloorConnection: (connection: PipeFloorConnection) => {
+    set((state) => ({
+      pipeFloorConnections: {
+        ...state.pipeFloorConnections,
+        [connection.id]: connection,
+      },
+    }));
+  },
+
+  updatePipeFloorConnection: (id: string, updates: Partial<PipeFloorConnection>) => {
+    set((state) => ({
+      pipeFloorConnections: {
+        ...state.pipeFloorConnections,
+        [id]: { ...state.pipeFloorConnections[id], ...updates },
+      },
+    }));
+  },
+
+  deletePipeFloorConnection: (id: string) => {
+    set((state) => {
+      const newConnections = { ...state.pipeFloorConnections };
+      delete newConnections[id];
+      return { pipeFloorConnections: newConnections };
+    });
+  },
+
+  startRailwayDrawing: (buildingId?: string, railPointId?: string, nodeId?: string) => {
+    const state = get();
+    
+    // If starting from a building, check for nearby railways to snap to OR nearby buildings for direct connection
+    if (buildingId && railPointId) {
+      const building = state.buildings[buildingId];
+      const buildingDef = BUILDING_TYPES[building.type];
+      const railPoint = buildingDef.railwayPoints?.find((rp) => rp.id === railPointId);
+      
+      if (building && buildingDef && railPoint) {
+        const worldPos = getRailwayConnectionPointWorldPos(building, buildingDef, railPoint);
+        const effectiveThreshold = getEffectiveSnapThreshold(RAILWAY_SNAP_THRESHOLD);
+        
+        // First check for nearby buildings with railway points for direct building-to-building connections
+        const nearbyBuilding = get().detectNearbyBuildingForRailwayConnection(worldPos, buildingId, BUILDING_RAILWAY_SNAP_THRESHOLD); // Use larger threshold for buildings
+        
+        if (nearbyBuilding) {
+          // Create direct building-to-building connection
+          const success = get().createDirectBuildingToRailwayConnection(
+            buildingId, 
+            railPointId, 
+            nearbyBuilding.buildingId, 
+            nearbyBuilding.railPointId
+          );
+          
+          if (success) {
+            return; // Connection created, don't start drawing mode
+          }
+        }
+        
+        // If no building connection found, check for nearby existing railways to snap to
+        const snapResult = detectSnapTargetOptimized(
+          worldPos,
+          spatialIndexManager.getRailwayNodeGrid(),
+          state.railwayNodes,
+          state.railwaySegments,
+          effectiveThreshold,
+          [], // Don't exclude any nodes for starting connections
+          []  // Don't exclude any segments for starting connections
+        );
+        
+        if (snapResult.shouldSnap && snapResult.snapTarget) {
+          console.log('[Railway Start] Found snap target from building:', snapResult.snapTarget);
+          
+          // If we found a snap target, connect directly instead of starting new drawing
+          if (snapResult.snapTarget.type === 'node') {
+            // Connect building to existing node
+            // Connect building to existing node
+            const anchorNodeId = `rail-anchor-${buildingId}-${railPointId}`;
+            const anchorNode: RailwayNode = {
+              id: anchorNodeId,
+              x: worldPos.x,
+              y: worldPos.y,
+              z: worldPos.z,
+              floor: building.floor,
+              isAnchor: true,
+            };
+            
+            // Create railway and segment connecting building to existing network
+            const newRailwayId = `railway-${Date.now()}`;
+            const newSegmentId = `rail-seg-${Date.now()}`;
+            const newSegment: RailwaySegment = {
+              id: newSegmentId,
+              type: 'straight',
+              startNode: anchorNodeId,
+              endNode: snapResult.snapTarget.targetId,
+              startPoint: worldPos,
+              endPoint: snapResult.snapTarget.snapPoint,
+              length: distance3D(worldPos, snapResult.snapTarget.snapPoint),
+              fromStation: buildingId,
+              fromRailPoint: railPointId,
+            };
+            
+            const newRailway: Railway = {
+              id: newRailwayId,
+              segments: [newSegmentId],
+              stations: [buildingId],
+              floor: building.floor,
+            };
+            
+            set({
+              railwayNodes: { ...state.railwayNodes, [anchorNodeId]: anchorNode },
+              railwaySegments: { ...state.railwaySegments, [newSegmentId]: newSegment },
+              railways: { ...state.railways, [newRailwayId]: newRailway },
+            });
+            
+            return; // Don't start drawing mode, connection is complete
+          } else if (snapResult.snapTarget.type === 'segment') {
+            // Split the segment and connect to the new node
+            const splitResult = splitSegmentAtPoint(
+              snapResult.snapTarget.targetId,
+              snapResult.snapTarget.snapPoint,
+              snapResult.snapTarget.t!,
+              state.railwaySegments,
+              state.railwayNodes,
+              building.floor
+            );
+            
+            if (splitResult) {
+              let nodes = { ...state.railwayNodes };
+              let segments = { ...state.railwaySegments };
+              let railways = { ...state.railways };
+              
+              // Add the new node from splitting
+              nodes[splitResult.newNode.id] = splitResult.newNode;
+              
+              // Remove original segment and add new split segments
+              delete segments[splitResult.removedSegmentId];
+              splitResult.newSegments.forEach(seg => {
+                segments[seg.id] = seg;
+              });
+              
+              // Update railways
+              Object.values(railways).forEach(railway => {
+                const segIndex = railway.segments.indexOf(splitResult.removedSegmentId);
+                if (segIndex !== -1) {
+                  railway.segments.splice(segIndex, 1, ...splitResult.newSegments.map(s => s.id));
+                }
+              });
+              
+              // Create anchor node and connect to split point
+              const anchorNodeId = `rail-anchor-${buildingId}-${railPointId}`;
+              const anchorNode: RailwayNode = {
+                id: anchorNodeId,
+                x: worldPos.x,
+                y: worldPos.y,
+                z: worldPos.z,
+                floor: building.floor,
+                isAnchor: true,
+              };
+              
+              const newRailwayId = `railway-${Date.now()}`;
+              const newSegmentId = `rail-seg-${Date.now()}`;
+              const newSegment: RailwaySegment = {
+                id: newSegmentId,
+                type: 'straight',
+                startNode: anchorNodeId,
+                endNode: splitResult.newNode.id,
+                startPoint: worldPos,
+                endPoint: snapResult.snapTarget.snapPoint,
+                length: distance3D(worldPos, snapResult.snapTarget.snapPoint),
+                fromStation: buildingId,
+                fromRailPoint: railPointId,
+              };
+              
+              const newRailway: Railway = {
+                id: newRailwayId,
+                segments: [newSegmentId],
+                stations: [buildingId],
+                floor: building.floor,
+              };
+              
+              nodes[anchorNodeId] = anchorNode;
+              segments[newSegmentId] = newSegment;
+              railways[newRailwayId] = newRailway;
+              
+              set({
+                railwayNodes: nodes,
+                railwaySegments: segments,
+                railways: railways,
+              });
+              
+              return; // Don't start drawing mode, connection is complete
+            }
+          }
+        }
+      }
+    }
+    
+    // No snap target found or not starting from building, use normal drawing logic
+    const result = startRailwayDrawing(state.buildings, buildingId, railPointId);
+    
+    if (result.startNode) {
+      set({
+        railwayNodes: { ...state.railwayNodes, [result.startNode.id]: result.startNode },
+        drawingState: {
+          ...state.drawingState,
+          ...result.drawingState,
+          railwayStartNode: result.startNode,
+        },
+      });
+    } else if (nodeId && state.railwayNodes[nodeId]) {
+      // Handle starting from existing node
+      const existingNode = state.railwayNodes[nodeId];
+      set({
+        drawingState: {
+          ...state.drawingState,
+          drawingRailway: true,
+          currentRailwayId: `railway-${Date.now()}`,
+          railwayStartNode: existingNode,
+          railwayPath: [nodeId],
+        },
+      });
+    }
+  },
+
+
+  finishRailwayDrawing: (buildingId?: string, railPointId?: string, nodeId?: string) => {
+    const state = get();
+    if (!state.drawingState.drawingRailway || !state.drawingState.currentRailwayId || (state.drawingState.railwayPath ?? []).length < 1) {
+      return;
+    }
+
+    let nodes = { ...state.railwayNodes };
+    let segments = { ...state.railwaySegments };
+    let railways = { ...state.railways };
+    let finalNodeId = nodeId;
+    let endBuildingId = buildingId;
+    let endRailPointId = railPointId;
+
+    // Handle building connection with snapping
+    if (buildingId && railPointId) {
+      const building = state.buildings[buildingId];
+      const buildingDef = BUILDING_TYPES[building.type];
+      const railPoint = buildingDef.railwayPoints?.find((rp) => rp.id === railPointId);
+      
+      if (building && buildingDef && railPoint) {
+        const worldPos = getRailwayConnectionPointWorldPos(building, buildingDef, railPoint);
+        const effectiveThreshold = getEffectiveSnapThreshold(RAILWAY_SNAP_THRESHOLD);
+        
+        // Check if we can make a direct building-to-building connection
+        if (state.drawingState.railwayStartStation && state.drawingState.railwayStartRailPoint) {
+          // We're connecting from one building to another - create optimized connection
+          const success = get().createDirectBuildingToRailwayConnection(
+            state.drawingState.railwayStartStation,
+            state.drawingState.railwayStartRailPoint,
+            buildingId,
+            railPointId,
+            true // isFinishingDrawing = true
+          );
+          
+          if (success) {
+            // Cancel the current drawing since we created the direct connection
+            get().cancelRailwayDrawing();
+            return;
+          }
+        }
+        
+        // Check for nearby existing railways to snap to
+        const snapResult = detectSnapTargetOptimized(
+          worldPos,
+          spatialIndexManager.getRailwayNodeGrid(),
+          state.railwayNodes,
+          state.railwaySegments,
+          effectiveThreshold,
+          state.drawingState.railwayPath || [], // Exclude current path nodes
+          []  // Don't exclude any segments
+        );
+        
+        if (snapResult.shouldSnap && snapResult.snapTarget) {
+          console.log('[Railway Finish] Found snap target at building connection:', snapResult.snapTarget);
+          
+          if (snapResult.snapTarget.type === 'node') {
+            finalNodeId = snapResult.snapTarget.targetId;
+          } else if (snapResult.snapTarget.type === 'segment' && snapResult.snapTarget.t !== undefined) {
+            // Split segment and use the new node
+            const splitResult = splitSegmentAtPoint(
+              snapResult.snapTarget.targetId,
+              snapResult.snapTarget.snapPoint,
+              snapResult.snapTarget.t,
+              segments,
+              nodes,
+              state.currentFloor
+            );
+            
+            if (splitResult) {
+              nodes[splitResult.newNode.id] = splitResult.newNode;
+              finalNodeId = splitResult.newNode.id;
+              
+              delete segments[splitResult.removedSegmentId];
+              splitResult.newSegments.forEach(seg => {
+                segments[seg.id] = seg;
+              });
+              
+              Object.values(railways).forEach(railway => {
+                const segIndex = railway.segments.indexOf(splitResult.removedSegmentId);
+                if (segIndex !== -1) {
+                  railway.segments.splice(segIndex, 1, ...splitResult.newSegments.map(s => s.id));
+                }
+              });
+            }
+          }
+        }
+      }
+    }
+
+    // Handle snapping for the final connection point when no building is specified
+    if (!finalNodeId && !buildingId) {
+      // Check if we have a snap result for the final point
+      const snapResult = state.drawingState.railwaySnapResult;
+      if (snapResult?.shouldSnap && snapResult.snapTarget) {
+        const snapTarget = snapResult.snapTarget;
+        
+        if (snapTarget.type === 'node') {
+          finalNodeId = snapTarget.targetId;
+          console.log('[Railway Finish] Using snapped node as end point:', finalNodeId);
+        } else if (snapTarget.type === 'segment' && snapTarget.t !== undefined) {
+          // Split segment at snap point for final connection
+          const splitResult = splitSegmentAtPoint(
+            snapTarget.targetId,
+            snapTarget.snapPoint,
+            snapTarget.t,
+            segments,
+            nodes,
+            state.currentFloor
+          );
+          
+          if (splitResult) {
+            // Add the new node
+            nodes[splitResult.newNode.id] = splitResult.newNode;
+            finalNodeId = splitResult.newNode.id;
+            
+            // Remove the original segment
+            delete segments[splitResult.removedSegmentId];
+            
+            // Add the new segments
+            splitResult.newSegments.forEach(seg => {
+              segments[seg.id] = seg;
+            });
+            
+            // Update railways to replace the old segment with new ones
+            Object.values(railways).forEach(railway => {
+              const segIndex = railway.segments.indexOf(splitResult.removedSegmentId);
+              if (segIndex !== -1) {
+                railway.segments.splice(
+                  segIndex, 
+                  1, 
+                  ...splitResult.newSegments.map(s => s.id)
+                );
+              }
+            });
+            
+            console.log('[Railway Finish] Split segment for end connection:', splitResult.newSegments.map(s => s.id));
+          }
+        }
+      }
+    }
+
+    // If a specific node ID is provided, handle snapping/merging
+    if (finalNodeId && state.drawingState.railwayPath && state.drawingState.railwayPath.length > 0) {
+      const lastNodeId = state.drawingState.railwayPath[state.drawingState.railwayPath.length - 1];
+      
+      // Check if we need to merge nodes
+      if (lastNodeId !== finalNodeId) {
+        const targetNode = nodes[finalNodeId];
+        if (targetNode) {
+          console.log('[Railway Snapping] Merging end node with existing node:', finalNodeId);
+          
+          // Update all segments that reference the last node to use the target node
+          segments = mergeNodes(finalNodeId, lastNodeId, segments);
+          
+          // Remove the last node since we're merging with existing one
+          delete nodes[lastNodeId];
+          
+          // Update the path to use the merged node
+          const updatedPath = [...state.drawingState.railwayPath];
+          updatedPath[updatedPath.length - 1] = finalNodeId;
+          
+          // Update the drawing state temporarily to reflect the merge
+          state.drawingState.railwayPath = updatedPath;
+        }
+      }
+    }
+
+    // Create a compatible drawing state for the modular logic
+    const railwayDrawingState = {
+      drawingRailway: state.drawingState.drawingRailway,
+      currentRailwayId: state.drawingState.currentRailwayId,
+      railwayPath: state.drawingState.railwayPath,
+      railwayStartNode: state.drawingState.railwayStartNode?.id,
+      railwayStartStation: state.drawingState.railwayStartStation,
+      railwayStartRailPoint: state.drawingState.railwayStartRailPoint,
+    };
+
+    const result = finishRailwayDrawingLogic(
+      railwayDrawingState,
+      nodes,
+      segments,
+      railways,
+      state.buildings,
+      state.currentFloor,
+      endBuildingId,
+      endRailPointId,
+      finalNodeId
+    );
+
+    if (result) {
+      // Consolidate nodes to fix any overlapping nodes at intersections
+      const { consolidatedNodes, consolidatedSegments } = consolidateProximityNodes(
+        result.nodes,
+        result.segments
+      );
+      
+      // Update railways to use consolidated segments
+      const consolidatedRailways = { ...result.railways };
+      Object.values(consolidatedRailways).forEach(railway => {
+        railway.segments = railway.segments.filter(segId => consolidatedSegments[segId] !== undefined);
+      });
+      
+      set({
+        railwayNodes: consolidatedNodes,
+        railwaySegments: consolidatedSegments,
+        railways: consolidatedRailways,
+        drawingState: {
+          ...state.drawingState,
+          drawingRailway: false,
+          currentRailwayId: undefined,
+          railwayPath: [],
+          railwayStartNode: undefined,
+          railwayStartStation: undefined,
+          railwayStartRailPoint: undefined,
+          railwaySnapResult: undefined,
+        },
+      });
+    }
+  },
+
+  cancelRailwayDrawing: () => {
+    set((state) => {
+      const newNodes = { ...state.railwayNodes };
+      const newSegments = { ...state.railwaySegments };
+      const newRailways = { ...state.railways };
+
+      (state.drawingState.railwayPath ?? []).forEach((nodeId) => {
+        const node = newNodes[nodeId];
+        if (node && !node.isAnchor) {
+          delete newNodes[nodeId];
+        }
+      });
+
+      const railwayId = state.drawingState.currentRailwayId;
+      if (railwayId && newRailways[railwayId]) {
+        newRailways[railwayId].segments.forEach((segId) => {
+          delete newSegments[segId];
+        });
+        delete newRailways[railwayId];
+      }
+
+      return {
+        railwayNodes: newNodes,
+        railwaySegments: newSegments,
+        railways: newRailways,
+        drawingState: {
+          ...state.drawingState,
+          drawingRailway: false,
+          currentRailwayId: undefined,
+          railwayStartNode: undefined,
+          railwayPath: [],
+          railwayStartStation: undefined,
+          railwayStartRailPoint: undefined,
+          railwaySnapResult: undefined,
+        },
+      };
+    });
+  },
+
+  setCurrentFloor: (floor) => set({ currentFloor: floor }),
+
+  setSelectedBuilding: (id) => set({ selectedBuilding: id }),
+  
+  setDrawingState: (newDrawingState: any) => set(() => ({
+    drawingState: newDrawingState
+  })),
+
+  addRailwayPoint: (point: Point3D) => {
+    const state = get();
+    if (!state.drawingState.drawingRailway || !state.drawingState.currentRailwayId) {
+      return;
+    }
+    
+    // Get effective snap threshold (can adjust based on zoom if needed)
+    const effectiveThreshold = getEffectiveSnapThreshold(RAILWAY_SNAP_THRESHOLD);
+    
+    // Detect snap targets, excluding nodes already in the current path
+    const snapResult = detectSnapTargetOptimized(
+      point,
+      spatialIndexManager.getRailwayNodeGrid(),
+      state.railwayNodes,
+      state.railwaySegments,
+      effectiveThreshold,
+      state.drawingState.railwayPath || [], // Exclude current path nodes
+      [] // Don't exclude any segments
+    );
+    
+    let nodes = { ...state.railwayNodes };
+    let segments = { ...state.railwaySegments };
+    let railways = { ...state.railways };
+    let newNodeId: string | undefined;
+    let actualPoint = point;
+    
+    if (snapResult.shouldSnap && snapResult.snapTarget) {
+      const snapTarget = snapResult.snapTarget;
+      
+      // Validate the snap
+      if (!isValidSnap(snapTarget, state.drawingState.railwayPath || [], nodes)) {
+        // If invalid, use the original point without snapping
+        actualPoint = point;
+        console.log('[Railway Snapping] Invalid snap target, using original point');
+      } else {
+        actualPoint = snapTarget.snapPoint;
+        
+        if (snapTarget.type === 'node') {
+          // Use existing node ID instead of creating new node
+          newNodeId = snapTarget.targetId;
+          console.log('[Railway Snapping] Snapping to existing node:', snapTarget.targetId);
+        } else if (snapTarget.type === 'segment' && snapTarget.t !== undefined) {
+          // Split segment at snap point
+          const splitResult = splitSegmentAtPoint(
+            snapTarget.targetId,
+            snapTarget.snapPoint,
+            snapTarget.t,
+            segments,
+            nodes,
+            state.currentFloor
+          );
+          
+          if (splitResult) {
+            // Add the new node
+            nodes[splitResult.newNode.id] = splitResult.newNode;
+            newNodeId = splitResult.newNode.id;
+            
+            // Remove the original segment
+            delete segments[splitResult.removedSegmentId];
+            
+            // Add the new segments
+            splitResult.newSegments.forEach(seg => {
+              segments[seg.id] = seg;
+            });
+            
+            // Update railways to replace the old segment with new ones
+            Object.values(railways).forEach(railway => {
+              const segIndex = railway.segments.indexOf(splitResult.removedSegmentId);
+              if (segIndex !== -1) {
+                railway.segments.splice(
+                  segIndex, 
+                  1, 
+                  ...splitResult.newSegments.map(s => s.id)
+                );
+              }
+            });
+            
+            console.log('[Railway Snapping] Split segment into:', splitResult.newSegments.map(s => s.id));
+          }
+        }
+      }
+    }
+    
+    // If we didn't snap to an existing node, use the regular logic
+    if (!newNodeId) {
+      // Create a compatible drawing state for the modular logic
+      const railwayDrawingState = {
+        drawingRailway: state.drawingState.drawingRailway,
+        currentRailwayId: state.drawingState.currentRailwayId,
+        railwayPath: state.drawingState.railwayPath,
+        railwayStartNode: state.drawingState.railwayStartNode?.id,
+        railwayStartStation: state.drawingState.railwayStartStation,
+        railwayStartRailPoint: state.drawingState.railwayStartRailPoint,
+      };
+      
+      const result = addRailwayPointLogic(
+        actualPoint,
+        state.currentFloor,
+        railwayDrawingState,
+        nodes,
+        segments,
+        railways
+      );
+      
+      if (result) {
+        set({
+          railwayNodes: result.nodes,
+          railwaySegments: result.segments,
+          railways: result.railways,
+          drawingState: {
+            ...state.drawingState,
+            railwayPath: result.path,
+            railwaySnapResult: snapResult,
+          },
+        });
+      }
+    } else {
+      // We snapped to an existing node, add it to the path
+      const newPath = [...(state.drawingState.railwayPath || []), newNodeId];
+      
+      // Create segment from last node to snapped node
+      if (newPath.length > 1) {
+        const prevNodeId = newPath[newPath.length - 2];
+        const prevNode = nodes[prevNodeId];
+        const currentNode = nodes[newNodeId];
+        
+        if (prevNode && currentNode) {
+          // Check if we need a curved segment
+          let segmentType: 'straight' | 'curve' = 'straight';
+          let controlPoints: Point3D[] | undefined;
+          
+          if (newPath.length > 2) {
+            const prevPrevNodeId = newPath[newPath.length - 3];
+            const prevPrevNode = nodes[prevPrevNodeId];
+            
+            if (prevPrevNode && shouldCreateTurn(prevPrevNode, prevNode, currentNode)) {
+              segmentType = 'curve';
+              const cp = calculateCurveControlPoint(prevPrevNode, prevNode, currentNode);
+              controlPoints = [cp];
+            }
+          }
+          
+          const newSegment = {
+            id: `rail-seg-${Date.now()}`,
+            type: segmentType,
+            startNode: prevNodeId,
+            endNode: newNodeId,
+            startPoint: { x: prevNode.x, y: prevNode.y, z: prevNode.z },
+            endPoint: { x: currentNode.x, y: currentNode.y, z: currentNode.z },
+            length: distance3D(prevNode, currentNode),
+            controlPoints,
+          };
+          
+          segments[newSegment.id] = newSegment;
+          
+          // Add to current railway
+          const railway = railways[state.drawingState.currentRailwayId!];
+          if (railway) {
+            railway.segments.push(newSegment.id);
+          }
+        }
+      }
+      
+      set({
+        railwayNodes: nodes,
+        railwaySegments: segments,
+        railways: railways,
+        drawingState: {
+          ...state.drawingState,
+          railwayPath: newPath,
+          railwaySnapResult: snapResult,
+        },
+      });
+    }
+  },
+addRailwayNode: (node: RailwayNode) => set((state) => {
+  const newNodes = { ...state.railwayNodes, [node.id]: node };
+  
+  // Add to spatial index
+  spatialIndexManager.addRailwayNode(node);
+  
+  return { railwayNodes: newNodes };
+}),
+updateRailwayNode: (id, updates) => set((state) => {
+  const newNodes = {
+    ...state.railwayNodes,
+    [id]: { ...state.railwayNodes[id], ...updates },
+  };
+
+  const newSegments = { ...state.railwaySegments };
+  Object.values(newSegments).forEach((seg) => {
+    let changed = false;
+    let newStartPoint = seg.startPoint;
+    let newEndPoint = seg.endPoint;
+
+    if (seg.startNode === id) {
+      newStartPoint = { x: newNodes[id].x, y: newNodes[id].y, z: newNodes[id].z };
+      changed = true;
+    }
+    if (seg.endNode === id) {
+      newEndPoint = { x: newNodes[id].x, y: newNodes[id].y, z: newNodes[id].z };
+      changed = true;
+    }
+
+    if (changed) {
+      newSegments[seg.id] = {
+        ...seg,
+        startPoint: newStartPoint,
+        endPoint: newEndPoint,
+        length: distance3D(newStartPoint, newEndPoint),
+      };
+    }
+  });
+
+  // Update in spatial index
+  const updatedNode = newNodes[id];
+  if (updatedNode) {
+    spatialIndexManager.updateRailwayNode(updatedNode);
+  }
+
+  return { railwayNodes: newNodes, railwaySegments: newSegments };
+}),
+deleteRailwayNode: (id: string) => set((state) => {
+  const newNodes = { ...state.railwayNodes };
+  const newSegments = { ...state.railwaySegments };
+  const newRailways = { ...state.railways };
+
+  // Remove segments connected to this node
+  Object.entries(newSegments).forEach(([segId, segment]) => {
+    if (segment.startNode === id || segment.endNode === id) {
+      delete newSegments[segId];
+      Object.values(newRailways).forEach((railway) => {
+        railway.segments = railway.segments.filter((s) => s !== segId);
+      });
+    }
+  });
+
+  // Remove empty railways
+  Object.entries(newRailways).forEach(([railwayId, railway]) => {
+    if (railway.segments.length === 0) {
+      delete newRailways[railwayId];
+    }
+  });
+
+  delete newNodes[id];
+
+  // Remove from spatial index
+  spatialIndexManager.removeRailwayNode(id);
+
+  return {
+    railwayNodes: newNodes,
+    railwaySegments: newSegments,
+    railways: newRailways,
+    selectedRailwayNode: state.selectedRailwayNode === id ? null : state.selectedRailwayNode,
+  };
+}),
+
+  setSelectedPole: (id) => set({ selectedPole: id }),
+
+  setSelectedPipeSupport: (id) => set({ selectedPipeSupport: id }),
+
+  setSelectedStickyNote: (id) => set({ selectedStickyNote: id }),
+
+  setSelectedRailwayNode: (id: string | null) => set({ selectedRailwayNode: id }),
+  
+  setSelectedRailwaySegment: (id: string | null) => set({ selectedRailwaySegment: id }),
+
+  updateRailwaySegment: (id: string, updates: Partial<RailwaySegment>) => set((state) => ({
+    railwaySegments: {
+      ...state.railwaySegments,
+      [id]: {
+        ...state.railwaySegments[id],
+        ...updates
+      }
+    }
+  })),
+
+  setSelectedConveyorLift: (id: string | null) => set({ selectedConveyorLift: id }),
+
+  setSelectedPipeFloorConnection: (id: string | null) => set({ selectedPipeFloorConnection: id }),
+
+  updateRailwaySegmentPoint: (segmentId: string, isStart: boolean, newPoint: Point3D) => set((state) => {
+    const segment = state.railwaySegments[segmentId];
+    if (!segment) return state;
+
+    const startPoint = isStart ? newPoint : segment.startPoint;
+    const endPoint = isStart ? segment.endPoint : newPoint;
+
+    const newSegment = {
+      ...segment,
+      startPoint,
+      endPoint,
+      length: distance3D(startPoint, endPoint),
+    };
+
+    return {
+      railwaySegments: {
+        ...state.railwaySegments,
+        [segmentId]: newSegment,
+      },
+    };
+  }),
+
+  consolidateRailwayNodes: () => set((state) => {
+    // Run consolidation
+    const { consolidatedNodes, consolidatedSegments, nodeMapping } = consolidateProximityNodes(
+      state.railwayNodes,
+      state.railwaySegments
+    );
+    
+    // Update railways to use new segment IDs
+    const updatedRailways: Record<string, Railway> = {};
+    Object.entries(state.railways).forEach(([railwayId, railway]) => {
+      const newSegmentIds: string[] = [];
+      railway.segments.forEach(segmentId => {
+        if (consolidatedSegments[segmentId]) {
+          newSegmentIds.push(segmentId);
+        }
+      });
+      
+      if (newSegmentIds.length > 0) {
+        updatedRailways[railwayId] = {
+          ...railway,
+          segments: newSegmentIds,
+        };
+      }
+    });
+    
+    // Update selected node if it was consolidated
+    let newSelectedNode = state.selectedRailwayNode;
+    if (newSelectedNode && nodeMapping[newSelectedNode] !== newSelectedNode) {
+      newSelectedNode = nodeMapping[newSelectedNode];
+    }
+    
+    console.log('[consolidateRailwayNodes] Consolidation complete:', {
+      originalNodeCount: Object.keys(state.railwayNodes).length,
+      consolidatedNodeCount: Object.keys(consolidatedNodes).length,
+      removedNodes: Object.keys(state.railwayNodes).length - Object.keys(consolidatedNodes).length,
+    });
+    
+    // Rebuild spatial index with consolidated nodes
+    spatialIndexManager.initializeRailwayNodes(consolidatedNodes);
+    
+    return {
+      railwayNodes: consolidatedNodes,
+      railwaySegments: consolidatedSegments,
+      railways: updatedRailways,
+      selectedRailwayNode: newSelectedNode,
+    };
+  }),
+
+clearLayout: () => set({
+  buildings: {},
+  conveyorPoles: {},
+  conveyorSegments: {},
+  conveyorBelts: {},
+  conveyorLifts: {},
+  pipeSupports: {},
+  pipeSegments: {},
+  pipelines: {},
+  pipeFloorConnections: {},
+  stickyNotes: {},
+  truckPaths: {},
+  railways: {},
+  railwaySegments: {},
+  railwayNodes: {},
+  foundations: {},
+  wallSegments: {},
+  selectedBuilding: null,
+  selectedPole: null,
+  selectedPipeSupport: null,
+  selectedStickyNote: null,
+  selectedRailwayNode: null,
+  selectedRailwaySegment: null,
+  selectedFoundation: null,
+  selectedWall: null,
+  drawingState: {
+    isDrawing: false,
+    mode: 'default',
+    currentBeltId: null,
+    startPole: null,
+    currentPath: [],
+    startBuildingId: undefined,
+    startConnectionPoint: undefined,
+    drawingRailway: false,
+    currentRailwayId: undefined,
+    railwayStartNode: undefined,
+    railwayPath: [],
+    railwayStartStation: undefined,
+    railwayStartRailPoint: undefined,
+    drawingPipe: false,
+    currentPipelineId: undefined,
+    pipeStartSupport: null,
+    pipePath: [],
+    pipeStartBuildingId: undefined,
+    pipeStartConnectionPoint: undefined,
+  },
+}),
+
+exportLayout: () => {
+  const state = get();
+  return JSON.stringify({
+    buildings: state.buildings,
+    conveyorPoles: state.conveyorPoles,
+    conveyorSegments: state.conveyorSegments,
+    conveyorBelts: state.conveyorBelts,
+    pipeSupports: state.pipeSupports,
+    pipeSegments: state.pipeSegments,
+    pipelines: state.pipelines,
+    stickyNotes: state.stickyNotes,
+    truckPaths: state.truckPaths,
+    railways: state.railways,
+    railwaySegments: state.railwaySegments,
+    railwayNodes: state.railwayNodes,
+    foundations: state.foundations,
+    wallSegments: state.wallSegments,
+    currentFloor: state.currentFloor,
+  });
+},
+
+importLayout: (layout: string) => {
+  try {
+    const parsed = JSON.parse(layout);
+    set({
+      buildings: parsed.buildings || {},
+      conveyorPoles: parsed.conveyorPoles || {},
+      conveyorSegments: parsed.conveyorSegments || {},
+      conveyorBelts: parsed.conveyorBelts || {},
+      pipeSupports: parsed.pipeSupports || {},
+      pipeSegments: parsed.pipeSegments || {},
+      pipelines: parsed.pipelines || {},
+      stickyNotes: parsed.stickyNotes || {},
+      truckPaths: parsed.truckPaths || {},
+      railways: parsed.railways || {},
+      railwaySegments: parsed.railwaySegments || {},
+      railwayNodes: parsed.railwayNodes || {},
+      foundations: parsed.foundations || {},
+      wallSegments: parsed.wallSegments || {},
+      currentFloor: parsed.currentFloor || 0,
+      selectedBuilding: null,
+      selectedPole: null,
+      selectedPipeSupport: null,
+      selectedStickyNote: null,
+      selectedRailwayNode: null,
+      selectedRailwaySegment: null,
+      drawingState: {
+        isDrawing: false,
+        mode: 'default',
+        currentBeltId: null,
+        startPole: null,
+        currentPath: [],
+        startBuildingId: undefined,
+        startConnectionPoint: undefined,
+        drawingRailway: false,
+        currentRailwayId: undefined,
+        railwayStartNode: undefined,
+        railwayPath: [],
+        railwayStartStation: undefined,
+        railwayStartRailPoint: undefined,
+        drawingPipe: false,
+        currentPipelineId: undefined,
+        pipeStartSupport: null,
+        pipePath: [],
+        pipeStartBuildingId: undefined,
+        pipeStartConnectionPoint: undefined,
+      },
+    });
+  } catch (e) {
+    console.error('Failed to import layout:', e);
+  }
+},
+
+
+  toggleGrid: () => set((state) => ({ showGrid: !state.showGrid })),
+
+  toggleFloorBelow: () => set((state) => ({ showFloorBelow: !state.showFloorBelow })),
+
+  setConveyorMode: (mode) => set({ conveyorMode: mode }),
+
+  setBuildingPanelWidth: (width) => set({ buildingPanelWidth: width }),
+
+  setPropertiesPanelWidth: (width) => set({ propertiesPanelWidth: width }),
+
+  toggleCategory: (category) => set((state) => {
+    const newSet = new Set(state.collapsedCategories);
+    if (newSet.has(category)) {
+      newSet.delete(category);
+    } else {
+      newSet.add(category);
+    }
+    return { collapsedCategories: newSet };
+  }),
+
+  setMobileConstraintMode: (mode: string) => set({ mobileConstraintMode: mode }),
+
+  // New helper function to detect nearby buildings for railway connections
+  detectNearbyBuildingForRailwayConnection: (point: Point3D, excludeBuildingId: string, threshold: number) => {
+    const state = get();
+    
+    for (const [buildingId, building] of Object.entries(state.buildings)) {
+      if (buildingId === excludeBuildingId) continue;
+      
+      const buildingDef = BUILDING_TYPES[building.type];
+      if (!buildingDef.railwayPoints || buildingDef.railwayPoints.length === 0) continue;
+      
+      // Check each railway point on this building
+      const thresholdSquared = threshold * threshold;
+      for (const railPoint of buildingDef.railwayPoints) {
+        const railPointWorldPos = getRailwayConnectionPointWorldPos(building, buildingDef, railPoint);
+        const distanceSquared = distance3DSquared(point, railPointWorldPos);
+        
+        if (distanceSquared <= thresholdSquared) {
+          const distance = Math.sqrt(distanceSquared); // Only calculate actual distance when needed
+          return {
+            buildingId,
+            railPointId: railPoint.id,
+            distance,
+            worldPos: railPointWorldPos
+          };
+        }
+      }
+    }
+    
+    return null;
+  },
+
+  // New function to create direct building-to-building railway connections
+  createDirectBuildingToRailwayConnection: (
+    fromBuildingId: string,
+    fromRailPointId: string,
+    toBuildingId: string,
+    toRailPointId: string,
+    isFinishingDrawing: boolean = false
+  ) => {
+    const state = get();
+    
+    const fromBuilding = state.buildings[fromBuildingId];
+    const toBuilding = state.buildings[toBuildingId];
+    
+    if (!fromBuilding || !toBuilding) return false;
+    
+    const fromBuildingDef = BUILDING_TYPES[fromBuilding.type];
+    const toBuildingDef = BUILDING_TYPES[toBuilding.type];
+    
+    const fromRailPoint = fromBuildingDef.railwayPoints?.find(rp => rp.id === fromRailPointId);
+    const toRailPoint = toBuildingDef.railwayPoints?.find(rp => rp.id === toRailPointId);
+    
+    if (!fromRailPoint || !toRailPoint) return false;
+    
+    const fromWorldPos = getRailwayConnectionPointWorldPos(fromBuilding, fromBuildingDef, fromRailPoint);
+    const toWorldPos = getRailwayConnectionPointWorldPos(toBuilding, toBuildingDef, toRailPoint);
+    
+    const connectionDistance = distance3D(fromWorldPos, toWorldPos);
+    
+    // Validate reasonable connection distance
+    if (connectionDistance > RAILWAY_MAX_LENGTH) {
+      console.warn('[Direct Railway Connection] Distance too large:', connectionDistance);
+      return false;
+    }
+    
+    // Create anchor nodes for both buildings
+    const fromAnchorId = `rail-anchor-${fromBuildingId}-${fromRailPointId}`;
+    const toAnchorId = `rail-anchor-${toBuildingId}-${toRailPointId}`;
+    
+    const fromAnchorNode: RailwayNode = {
+      id: fromAnchorId,
+      x: fromWorldPos.x,
+      y: fromWorldPos.y,
+      z: fromWorldPos.z,
+      floor: fromBuilding.floor,
+      isAnchor: true,
+    };
+    
+    const toAnchorNode: RailwayNode = {
+      id: toAnchorId,
+      x: toWorldPos.x,
+      y: toWorldPos.y,
+      z: toWorldPos.z,
+      floor: toBuilding.floor,
+      isAnchor: true,
+    };
+    
+    // Determine if we need a curved connection based on building orientations
+    let segmentType: 'straight' | 'curve' = 'straight';
+    let controlPoints: Point3D[] | undefined;
+    
+    // Check if buildings are facing each other or if we need a curve
+    const needsCurve = get().shouldCreateCurvedRailwayConnection(fromBuilding, fromRailPoint, toBuilding, toRailPoint);
+    
+    if (needsCurve) {
+      segmentType = 'curve';
+      controlPoints = [get().calculateRailwayConnectionControlPoint(fromWorldPos, toWorldPos, fromBuilding, toBuilding)];
+    }
+    
+    // Create the railway segment
+    const segmentId = `rail-seg-${Date.now()}`;
+    const segment: RailwaySegment = {
+      id: segmentId,
+      type: segmentType,
+      startNode: fromAnchorId,
+      endNode: toAnchorId,
+      startPoint: fromWorldPos,
+      endPoint: toWorldPos,
+      length: connectionDistance,
+      controlPoints,
+      fromStation: fromBuildingId,
+      fromRailPoint: fromRailPointId,
+      toStation: toBuildingId,
+      toRailPoint: toRailPointId,
+      direction: 'forward', // Default direction
+      showArrows: true, // Show arrows by default
+    };
+    
+    // Create or update the railway
+    let railwayId: string;
+    let railway: Railway;
+    
+    if (isFinishingDrawing && state.drawingState.currentRailwayId) {
+      // Use the existing railway from drawing state
+      railwayId = state.drawingState.currentRailwayId;
+      railway = {
+        id: railwayId,
+        segments: [segmentId],
+        stations: [fromBuildingId, toBuildingId],
+        floor: Math.min(fromBuilding.floor, toBuilding.floor),
+      };
+    } else {
+      // Create a new railway
+      railwayId = `railway-${Date.now()}`;
+      railway = {
+        id: railwayId,
+        segments: [segmentId],
+        stations: [fromBuildingId, toBuildingId],
+        floor: Math.min(fromBuilding.floor, toBuilding.floor),
+      };
+    }
+    
+    // Update the store
+    set({
+      railwayNodes: {
+        ...state.railwayNodes,
+        [fromAnchorId]: fromAnchorNode,
+        [toAnchorId]: toAnchorNode,
+      },
+      railwaySegments: {
+        ...state.railwaySegments,
+        [segmentId]: segment,
+      },
+      railways: {
+        ...state.railways,
+        [railwayId]: railway,
+      },
+    });
+    
+    console.log('[Direct Railway Connection] Created connection between buildings:', {
+      from: `${fromBuildingId}:${fromRailPointId}`,
+      to: `${toBuildingId}:${toRailPointId}`,
+      distance: connectionDistance,
+      type: segmentType
+    });
+    
+    return true;
+  },
+
+  // Helper to determine if a curved connection is needed
+  shouldCreateCurvedRailwayConnection: (
+    fromBuilding: Building,
+    fromRailPoint: RailwayConnectionPoint,
+    toBuilding: Building,
+    toRailPoint: RailwayConnectionPoint
+  ) => {
+    // Create curves when buildings are not directly aligned or facing each other
+    const fromWorldPos = getRailwayConnectionPointWorldPos(fromBuilding, BUILDING_TYPES[fromBuilding.type], fromRailPoint);
+    const toWorldPos = getRailwayConnectionPointWorldPos(toBuilding, BUILDING_TYPES[toBuilding.type], toRailPoint);
+    
+    const dx = Math.abs(toWorldPos.x - fromWorldPos.x);
+    const dy = Math.abs(toWorldPos.y - fromWorldPos.y);
+    
+    // Use curves for connections that are not perfectly straight or are at certain angles
+    const isAligned = dx < 1 || dy < 1; // Less than 1 meter misalignment
+    const distance = distance3D(fromWorldPos, toWorldPos);
+    
+    // Use curves for longer connections or when not perfectly aligned
+    return !isAligned || distance > 20;
+  },
+
+  // Helper to calculate control point for curved railway connections
+  calculateRailwayConnectionControlPoint: (
+    fromPos: Point3D,
+    toPos: Point3D
+  ): Point3D => {
+    // Calculate a control point that creates a smooth curve
+    const midX = (fromPos.x + toPos.x) / 2;
+    const midY = (fromPos.y + toPos.y) / 2;
+    const midZ = (fromPos.z + toPos.z) / 2;
+    
+    // Offset the control point perpendicular to the connection line
+    const dx = toPos.x - fromPos.x;
+    const dy = toPos.y - fromPos.y;
+    const length = Math.sqrt(dx * dx + dy * dy);
+    
+    if (length === 0) {
+      return { x: midX, y: midY, z: midZ };
+    }
+    
+    // Perpendicular vector
+    const perpX = -dy / length;
+    const perpY = dx / length;
+    
+    // Offset amount based on distance (larger offset for longer connections)
+    const offsetAmount = Math.min(length * 0.2, 10); // Max 10 meter offset
+    
+    return {
+      x: midX + perpX * offsetAmount,
+      y: midY + perpY * offsetAmount,
+      z: midZ,
+    };
+  },
+
+  // Foundation methods
+  addFoundation: (foundation) => set((state) => ({
+    foundations: { ...state.foundations, [foundation.id]: foundation },
+  })),
+
+  updateFoundation: (id, updates) => set((state) => ({
+    foundations: {
+      ...state.foundations,
+      [id]: { ...state.foundations[id], ...updates },
+    },
+  })),
+
+  deleteFoundation: (id) => set((state) => {
+    const newFoundations = { ...state.foundations };
+    delete newFoundations[id];
+    return { foundations: newFoundations };
+  }),
+
+  setSelectedFoundation: (id) => set({ selectedFoundation: id }),
+
+  startFoundationDrawing: (startPoint) => set((state) => ({
+    drawingState: {
+      ...state.drawingState,
+      drawingFoundation: true,
+      foundationStartPoint: startPoint,
+      currentFoundationId: `foundation-${Date.now()}`,
+    },
+  })),
+
+  finishFoundationDrawing: (endPoint, material) => set((state) => {
+    if (!state.drawingState.foundationStartPoint || !state.drawingState.currentFoundationId) {
+      return {};
+    }
+
+    const startX = Math.min(state.drawingState.foundationStartPoint.x, endPoint.x);
+    const startY = Math.min(state.drawingState.foundationStartPoint.y, endPoint.y);
+    const endX = Math.max(state.drawingState.foundationStartPoint.x, endPoint.x);
+    const endY = Math.max(state.drawingState.foundationStartPoint.y, endPoint.y);
+
+    // Snap to 8m grid
+    const x = Math.floor(startX / 8) * 8;
+    const y = Math.floor(startY / 8) * 8;
+    const width = Math.ceil((endX - x) / 8) * 8;
+    const height = Math.ceil((endY - y) / 8) * 8;
+
+    const foundation: Foundation = {
+      id: state.drawingState.currentFoundationId,
+      x,
+      y,
+      z: state.currentFloor * 4,
+      floor: state.currentFloor,
+      width,
+      height,
+      material,
+    };
+
+    return {
+      foundations: { ...state.foundations, [foundation.id]: foundation },
+      drawingState: {
+        ...state.drawingState,
+        drawingFoundation: false,
+        foundationStartPoint: undefined,
+        currentFoundationId: undefined,
+      },
+    };
+  }),
+
+  cancelFoundationDrawing: () => set((state) => ({
+    drawingState: {
+      ...state.drawingState,
+      drawingFoundation: false,
+      foundationStartPoint: undefined,
+      currentFoundationId: undefined,
+    },
+  })),
+
+  // Wall methods
+  addWallSegment: (wall) => set((state) => ({
+    wallSegments: { ...state.wallSegments, [wall.id]: wall },
+  })),
+
+  updateWallSegment: (id, updates) => set((state) => ({
+    wallSegments: {
+      ...state.wallSegments,
+      [id]: { ...state.wallSegments[id], ...updates },
+    },
+  })),
+
+  deleteWallSegment: (id) => set((state) => {
+    const newWalls = { ...state.wallSegments };
+    delete newWalls[id];
+    return { wallSegments: newWalls };
+  }),
+
+  setSelectedWall: (id) => set({ selectedWall: id }),
+
+  startWallDrawing: (startPoint, wallHeight) => set((state) => ({
+    drawingState: {
+      ...state.drawingState,
+      drawingWall: true,
+      wallStartPoint: startPoint,
+      wallSegments: [],
+      currentWallId: `wall-${Date.now()}`,
+      wallHeight,
+    },
+  })),
+
+  addWallPoint: (point) => set((state) => {
+    if (!state.drawingState.wallStartPoint) return {};
+
+    const lastPoint = state.drawingState.wallSegments && state.drawingState.wallSegments.length > 0
+      ? { 
+          x: state.drawingState.wallSegments[state.drawingState.wallSegments.length - 1].endX,
+          y: state.drawingState.wallSegments[state.drawingState.wallSegments.length - 1].endY
+        }
+      : state.drawingState.wallStartPoint;
+
+    // Calculate distance and angle
+    const dx = point.x - lastPoint.x;
+    const dy = point.y - lastPoint.y;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+    const angle = Math.atan2(dy, dx) * 180 / Math.PI;
+
+    // Create 8m segments along the line
+    const segments: WallSegment[] = [];
+    const numSegments = Math.ceil(distance / 8);
+
+    for (let i = 0; i < numSegments; i++) {
+      const t = i / numSegments;
+      const segmentX = Math.round((lastPoint.x + dx * t) / 8) * 8;
+      const segmentY = Math.round((lastPoint.y + dy * t) / 8) * 8;
+      const nextT = Math.min((i + 1) / numSegments, 1);
+      const segmentEndX = Math.round((lastPoint.x + dx * nextT) / 8) * 8;
+      const segmentEndY = Math.round((lastPoint.y + dy * nextT) / 8) * 8;
+
+      segments.push({
+        id: `${state.drawingState.currentWallId}-${Date.now()}-${i}`,
+        x: segmentX,
+        y: segmentY,
+        z: state.currentFloor * 4,
+        floor: state.currentFloor,
+        endX: segmentEndX,
+        endY: segmentEndY,
+        height: state.drawingState.wallHeight || 4,
+        material: 'default',
+        rotation: angle,
+        length: 8,
+      });
+    }
+
+    return {
+      drawingState: {
+        ...state.drawingState,
+        wallSegments: [...(state.drawingState.wallSegments || []), ...segments],
+      },
+    };
+  }),
+
+  finishWallDrawing: (material) => set((state) => {
+    if (!state.drawingState.wallSegments || state.drawingState.wallSegments.length === 0) {
+      return {
+        drawingState: {
+          ...state.drawingState,
+          drawingWall: false,
+          wallStartPoint: undefined,
+          wallSegments: [],
+          currentWallId: undefined,
+        },
+      };
+    }
+
+    // Update all segments with the selected material
+    const newWallSegments: Record<string, WallSegment> = { ...state.wallSegments };
+    state.drawingState.wallSegments.forEach((segment) => {
+      newWallSegments[segment.id] = { ...segment, material };
+    });
+
+    return {
+      wallSegments: newWallSegments,
+      drawingState: {
+        ...state.drawingState,
+        drawingWall: false,
+        wallStartPoint: undefined,
+        wallSegments: [],
+        currentWallId: undefined,
+      },
+    };
+  }),
+
+  cancelWallDrawing: () => set((state) => ({
+    drawingState: {
+      ...state.drawingState,
+      drawingWall: false,
+      wallStartPoint: undefined,
+      wallSegments: [],
+      currentWallId: undefined,
+    },
+  })),
+
+  setSelectedTool: (tool) => set((state) => {
+    // Clean up any active drawing states when switching tools
+    const cleanDrawingState = {
+      ...state.drawingState,
+      // Cancel foundation drawing if not selecting foundation tool
+      drawingFoundation: tool === 'foundation' ? state.drawingState.drawingFoundation : false,
+      foundationStartPoint: tool === 'foundation' ? state.drawingState.foundationStartPoint : undefined,
+      currentFoundationId: tool === 'foundation' ? state.drawingState.currentFoundationId : undefined,
+      // Cancel wall drawing if not selecting wall tool
+      drawingWall: tool === 'wall' ? state.drawingState.drawingWall : false,
+      wallStartPoint: tool === 'wall' ? state.drawingState.wallStartPoint : undefined,
+      wallSegments: tool === 'wall' ? state.drawingState.wallSegments : [],
+      currentWallId: tool === 'wall' ? state.drawingState.currentWallId : undefined,
+      wallHeight: tool === 'wall' ? state.drawingState.wallHeight : 4,
+    };
+
+    return {
+      selectedTool: tool,
+      drawingState: cleanDrawingState,
+    };
+  }),
+}));
+
+// Export function to initialize spatial index for existing data
+export const initializeSpatialIndex = (railwayNodes: Record<string, RailwayNode>) => {
+  spatialIndexManager.initializeRailwayNodes(railwayNodes);
+};
+
+// Export function to get spatial index manager (for debugging/stats)
+export const getSpatialIndexManager = () => spatialIndexManager;

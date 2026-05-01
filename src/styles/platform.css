@@ -1,0 +1,281 @@
+/* Platform-specific styles for cross-platform consistency */
+
+/* Base styles for all platforms */
+* {
+  /* Prevent text selection cursor on UI elements */
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  user-select: none;
+}
+
+/* Allow text selection in specific areas */
+.selectable,
+.selectable * {
+  -webkit-user-select: text;
+  -moz-user-select: text;
+  -ms-user-select: text;
+  user-select: text;
+}
+
+/* Windows-specific styles */
+[data-platform="windows"] {
+  /* Windows font rendering */
+  -webkit-font-smoothing: auto;
+  -moz-osx-font-smoothing: auto;
+  
+  /* Windows scrollbar styles */
+  scrollbar-width: thin;
+  scrollbar-color: #888 #f1f1f1;
+}
+
+[data-platform="windows"] ::-webkit-scrollbar {
+  width: 17px;
+  height: 17px;
+}
+
+[data-platform="windows"] ::-webkit-scrollbar-track {
+  background: #f1f1f1;
+  border: 1px solid #d4d4d4;
+}
+
+[data-platform="windows"] ::-webkit-scrollbar-thumb {
+  background: #c1c1c1;
+  border: 1px solid #a8a8a8;
+}
+
+[data-platform="windows"] ::-webkit-scrollbar-thumb:hover {
+  background: #a8a8a8;
+}
+
+[data-platform="windows"] ::-webkit-scrollbar-thumb:active {
+  background: #787878;
+}
+
+/* Windows window controls area */
+[data-platform="windows"] .titlebar-area {
+  -webkit-app-region: drag;
+  height: 32px;
+  padding-right: 138px; /* Space for minimize, maximize, close buttons */
+}
+
+/* macOS-specific styles */
+[data-platform="macos"] {
+  /* macOS font rendering */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  
+  /* macOS uses overlay scrollbars */
+  scrollbar-width: none;
+}
+
+[data-platform="macos"] ::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  background: transparent;
+}
+
+/* macOS traffic lights area */
+[data-platform="macos"] .titlebar-area {
+  -webkit-app-region: drag;
+  height: 28px;
+  padding-left: 70px; /* Space for traffic light buttons */
+}
+
+/* macOS vibrancy effect support */
+[data-platform="macos"] .vibrancy-area {
+  background-color: rgba(255, 255, 255, 0.5);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+/* Linux-specific styles */
+[data-platform="linux"] {
+  /* Linux font rendering */
+  -webkit-font-smoothing: subpixel-antialiased;
+  -moz-osx-font-smoothing: auto;
+  
+  /* Linux scrollbar styles */
+  scrollbar-width: thin;
+  scrollbar-color: #5a5a5a #2b2b2b;
+}
+
+[data-platform="linux"] ::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+[data-platform="linux"] ::-webkit-scrollbar-track {
+  background: #2b2b2b;
+}
+
+[data-platform="linux"] ::-webkit-scrollbar-thumb {
+  background: #5a5a5a;
+  border-radius: 6px;
+}
+
+[data-platform="linux"] ::-webkit-scrollbar-thumb:hover {
+  background: #7a7a7a;
+}
+
+/* Linux window controls */
+[data-platform="linux"] .titlebar-area {
+  -webkit-app-region: drag;
+  height: 30px;
+}
+
+/* High DPI adjustments */
+[data-high-dpi="true"] {
+  /* Ensure crisp rendering on high DPI displays */
+  image-rendering: -webkit-optimize-contrast;
+  image-rendering: crisp-edges;
+}
+
+/* Platform-specific focus styles */
+[data-platform="windows"] :focus-visible {
+  outline: 2px solid #0078d4;
+  outline-offset: 2px;
+}
+
+[data-platform="macos"] :focus-visible {
+  outline: 3px solid #007aff;
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+[data-platform="linux"] :focus-visible {
+  outline: 2px solid #ff7700;
+  outline-offset: 2px;
+}
+
+/* Platform-specific button styles */
+[data-platform="windows"] button {
+  border-radius: 2px;
+  transition: all 0.1s ease-in-out;
+}
+
+[data-platform="macos"] button {
+  border-radius: 6px;
+  transition: all 0.2s ease-in-out;
+}
+
+[data-platform="linux"] button {
+  border-radius: 4px;
+  transition: all 0.15s ease-in-out;
+}
+
+/* Platform-specific shadows */
+[data-platform="windows"] .elevated {
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+[data-platform="macos"] .elevated {
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.07),
+              0 1px 3px rgba(0, 0, 0, 0.06);
+}
+
+[data-platform="linux"] .elevated {
+  box-shadow: 0 3px 5px rgba(0, 0, 0, 0.15);
+}
+
+/* Platform-specific context menus */
+[data-platform="windows"] .context-menu {
+  border: 1px solid #d1d1d1;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+[data-platform="macos"] .context-menu {
+  border: none;
+  box-shadow: 0 5px 10px rgba(0, 0, 0, 0.12),
+              0 0 0 0.5px rgba(0, 0, 0, 0.05);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+[data-platform="linux"] .context-menu {
+  border: 1px solid #3a3a3a;
+  box-shadow: 0 3px 6px rgba(0, 0, 0, 0.2);
+}
+
+/* Platform-specific tooltips */
+[data-platform="windows"] .tooltip {
+  border: 1px solid #767676;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+[data-platform="macos"] .tooltip {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  backdrop-filter: blur(5px);
+  -webkit-backdrop-filter: blur(5px);
+}
+
+[data-platform="linux"] .tooltip {
+  border: 1px solid #4a4a4a;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+/* Platform-specific animations */
+[data-platform="windows"] * {
+  animation-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+[data-platform="macos"] * {
+  animation-timing-function: cubic-bezier(0.25, 0.1, 0.25, 1);
+}
+
+[data-platform="linux"] * {
+  animation-timing-function: cubic-bezier(0.4, 0, 0.6, 1);
+}
+
+/* Disable animations based on system preferences */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* 
+ * OVERRIDES FOR NEXUS UI ELEMENTS
+ * These must come last to ensure they override platform defaults
+ */
+
+/* Building Palette Scrollbar Override */
+.palette-scrollbar::-webkit-scrollbar {
+  width: 6px !important;
+  height: 6px !important;
+}
+
+.palette-scrollbar::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.3) !important;
+  border-radius: 3px !important;
+  border: none !important;
+}
+
+.palette-scrollbar::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, rgba(250, 149, 73, 0.4) 0%, rgba(94, 102, 139, 0.4) 100%) !important;
+  border-radius: 3px !important;
+}
+
+.palette-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, rgba(250, 149, 73, 0.6) 0%, rgba(94, 102, 139, 0.6) 100%) !important;
+}
+
+/* Search Input Placeholder Fix */
+.building-search-input {
+  padding-left: 56px !important;
+}
+
+.building-search-input::placeholder {
+  padding-left: 0 !important;
+  text-indent: 0 !important;
+  opacity: 0.6;
+}
+
+/* Specific platform override for Windows 17px scrollbar */
+[data-platform="windows"] .palette-scrollbar::-webkit-scrollbar {
+  width: 6px !important;
+}

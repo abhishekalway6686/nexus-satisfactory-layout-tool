@@ -1,0 +1,29 @@
+{
+  "name": "satisfactory-layout-tool-launcher",
+  "version": "2.0.0",
+  "description": "Launcher for Satisfactory Layout Tool",
+  "main": "launcher.js",
+  "bin": {
+    "satisfactory-layout-tool": "./launcher.js"
+  },
+  "scripts": {
+    "start": "node launcher.js",
+    "build:windows": "pkg launcher.js --target node18-win-x64 --output dist/SatisfactoryLayoutTool.exe",
+    "build:macos": "pkg launcher.js --target node18-macos-x64 --output dist/SatisfactoryLayoutTool",
+    "build:macos-arm": "pkg launcher.js --target node18-macos-arm64 --output dist/SatisfactoryLayoutTool-arm64",
+    "build:linux": "pkg launcher.js --target node18-linux-x64 --output dist/SatisfactoryLayoutTool",
+    "build:all": "npm run build:windows && npm run build:linux"
+  },
+  "pkg": {
+    "assets": [],
+    "targets": [
+      "node18-win-x64",
+      "node18-macos-x64",
+      "node18-linux-x64"
+    ],
+    "outputPath": "dist"
+  },
+  "devDependencies": {
+    "pkg": "^5.8.1"
+  }
+}

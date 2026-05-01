@@ -1,0 +1,490 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useLayoutStore } from '../store/layoutStore';
+import { 
+  Point3D,
+  UniversalSpatialResult,
+  SpatialQueryOptions
+} from '../tauri/commands';
+import { 
+  queryBuildingsRadius, 
+  universalSpatialQuery, 
+  getSpatialStats
+} from '../tauri/universalCommands';
+import { isTauriEnvironment } from '../tauri/environment';
+import { BUILDING_TYPES } from '../constants';
+
+export interface ViewportBounds {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+  width: number;
+  height: number;
+}
+
+export interface ViewportObjects {
+  buildings: any[];
+  conveyorPoles: any[];
+  pipeSupports: any[];
+  conveyorBelts: any[];
+  pipelines: any[];
+  railways: any[];
+  powerlineSegments: any[];
+  foundations: any[];
+  wallSegments: any[];
+  railingSegments: any[];
+}
+
+export interface ViewportPerformanceMetrics {
+  totalObjectsChecked: number;
+  visibleObjectsReturned: number;
+  queryTimeMs: number;
+  fallbackUsed: boolean;
+  spatialIndexUsed: boolean;
+  lastUpdateTime: number;
+}
+
+const VIEWPORT_UPDATE_THRESHOLD = 50; // pixels
+const RUST_QUERY_RADIUS_MULTIPLIER = 1.5; // Query slightly larger area for smooth panning
+
+// Add graceful degradation when Rust fails
+const handleRustError = (error: any, operation: string): void => {
+  console.warn(`Viewport system: ${operation} failed, using fallback:`, error);
+  // Could add telemetry here to track Rust failures
+};
+
+export const useViewportSystem = (
+  bounds: ViewportBounds, 
+  currentFloor: number,
+  showFloorBelow: boolean = false
+) => {
+  const [visibleObjects, setVisibleObjects] = useState<ViewportObjects>({
+    buildings: [],
+    conveyorPoles: [],
+    pipeSupports: [],
+    conveyorBelts: [],
+    pipelines: [],
+    railways: [],
+    powerlineSegments: [],
+    foundations: [],
+    wallSegments: [],
+    railingSegments: []
+  });
+  
+  const [performanceMetrics, setPerformanceMetrics] = useState<ViewportPerformanceMetrics>({
+    totalObjectsChecked: 0,
+    visibleObjectsReturned: 0,
+    queryTimeMs: 0,
+    fallbackUsed: false,
+    spatialIndexUsed: false,
+    lastUpdateTime: 0
+  });
+
+  const [isRustAvailable, setIsRustAvailable] = useState(false);
+  const lastBoundsRef = useRef<ViewportBounds | null>(null);
+  const updateDebounceRef = useRef<NodeJS.Timeout>();
+
+  // Get store data for fallback
+  const {
+    buildings,
+    conveyorPoles,
+    pipeSupports,
+    conveyorBelts,
+    pipelines,
+    railways,
+    powerlineSegments,
+    foundations,
+    wallSegments,
+    railingSegments,
+    powerlines
+  } = useLayoutStore();
+
+  // Check if significant viewport change occurred
+  const hasSignificantViewportChange = useCallback((newBounds: ViewportBounds): boolean => {
+    if (!lastBoundsRef.current) return true;
+    
+    const lastBounds = lastBoundsRef.current;
+    const deltaX = Math.abs(newBounds.left - lastBounds.left);
+    const deltaY = Math.abs(newBounds.top - lastBounds.top);
+    const deltaWidth = Math.abs(newBounds.width - lastBounds.width);
+    const deltaHeight = Math.abs(newBounds.height - lastBounds.height);
+    
+    return deltaX > VIEWPORT_UPDATE_THRESHOLD || 
+           deltaY > VIEWPORT_UPDATE_THRESHOLD ||
+           deltaWidth > VIEWPORT_UPDATE_THRESHOLD * 0.1 ||
+           deltaHeight > VIEWPORT_UPDATE_THRESHOLD * 0.1;
+  }, []);
+
+  // Fallback filtering functions (original O(n) logic for web environment)
+  const filterObjectsFallback = useCallback((targetBounds: ViewportBounds) => {
+    const startTime = performance.now();
+
+    // Helper functions matching original logic
+    const isBuildingVisible = (building: any, buildingDef: any): boolean => {
+      if (!buildingDef) return false;
+      const left = building.x;
+      const right = building.x + buildingDef.width;
+      const top = building.y;
+      const bottom = building.y + buildingDef.depth;
+      
+      return !(right < targetBounds.left || left > targetBounds.right || 
+               bottom < targetBounds.top || top > targetBounds.bottom);
+    };
+
+    const isPointVisible = (x: number, y: number, padding = 2): boolean => {
+      return x >= targetBounds.left - padding && 
+             x <= targetBounds.right + padding && 
+             y >= targetBounds.top - padding && 
+             y <= targetBounds.bottom + padding;
+    };
+
+    // Filter buildings
+    const allBuildings = Object.values(buildings);
+    const currentFloorBuildings = allBuildings.filter((b: any) => {
+      const buildingDef = BUILDING_TYPES[b.type];
+      const isOnFloor = b.floor === currentFloor;
+      return isOnFloor && isBuildingVisible(b, buildingDef);
+    });
+
+    const floorBelowBuildings = showFloorBelow ? allBuildings.filter((b: any) => {
+      const buildingDef = BUILDING_TYPES[b.type];
+      const isOnFloorBelow = b.floor === currentFloor - 1;
+      return isOnFloorBelow && isBuildingVisible(b, buildingDef);
+    }) : [];
+
+    // Filter other objects
+    const allPoles = Object.values(conveyorPoles);
+    const currentFloorPoles = allPoles.filter((p: any) => 
+      p.floor === currentFloor && isPointVisible(p.x, p.y)
+    );
+    const floorBelowPoles = showFloorBelow ? 
+      allPoles.filter((p: any) => p.floor === currentFloor - 1 && isPointVisible(p.x, p.y)) : [];
+
+    const allSupports = Object.values(pipeSupports);
+    const currentFloorPipeSupports = allSupports.filter((s: any) => 
+      s.floor === currentFloor && isPointVisible(s.x, s.y)
+    );
+    const floorBelowPipeSupports = showFloorBelow ? 
+      allSupports.filter((s: any) => s.floor === currentFloor - 1 && isPointVisible(s.x, s.y)) : [];
+
+    // Infrastructure filtering (less expensive, no visibility checks needed for lines)
+    const allConveyors = Object.values(conveyorBelts);
+    const currentFloorConveyors = allConveyors.filter((belt: any) => belt.floor === currentFloor);
+    const floorBelowConveyors = showFloorBelow ? 
+      allConveyors.filter((belt: any) => belt.floor === currentFloor - 1) : [];
+
+    const allPipelines = Object.values(pipelines);
+    const currentFloorPipelines = allPipelines.filter((pipeline: any) => pipeline.floor === currentFloor);
+    const floorBelowPipelines = showFloorBelow ? 
+      allPipelines.filter((pipeline: any) => pipeline.floor === currentFloor - 1) : [];
+
+    const allRailways = Object.values(railways);
+    const currentFloorRailways = allRailways.filter((railway: any) => railway.floor === currentFloor);
+    const floorBelowRailways = showFloorBelow ? 
+      allRailways.filter((railway: any) => railway.floor === currentFloor - 1) : [];
+
+    // Powerline segments with map optimization
+    const segmentToPowerlineMap = new Map<string, { floor: number }>();
+    Object.values(powerlines).forEach((powerline: any) => {
+      powerline.segments.forEach((segmentId: string) => {
+        segmentToPowerlineMap.set(segmentId, { floor: powerline.floor });
+      });
+    });
+
+    const allPowerlineSegments = Object.values(powerlineSegments);
+    const currentFloorPowerlineSegments = allPowerlineSegments.filter((segment: any) => {
+      const powerline = segmentToPowerlineMap.get(segment.id);
+      return powerline && powerline.floor === currentFloor;
+    });
+    const floorBelowPowerlineSegments = showFloorBelow ? 
+      allPowerlineSegments.filter((segment: any) => {
+        const powerline = segmentToPowerlineMap.get(segment.id);
+        return powerline && powerline.floor === currentFloor - 1;
+      }) : [];
+
+    const allFoundations = Object.values(foundations);
+    const currentFloorFoundations = allFoundations.filter((f: any) => f.floor === currentFloor);
+    const floorBelowFoundations = showFloorBelow ? 
+      allFoundations.filter((f: any) => f.floor === currentFloor - 1) : [];
+
+    const allWalls = Object.values(wallSegments);
+    const currentFloorWalls = allWalls.filter((w: any) => w.floor === currentFloor);
+    const floorBelowWalls = showFloorBelow ? 
+      allWalls.filter((w: any) => w.floor === currentFloor - 1) : [];
+
+    const allRailings = Object.values(railingSegments);
+    const currentFloorRailings = allRailings.filter((r: any) => r.floor === currentFloor);
+    const floorBelowRailings = showFloorBelow ? 
+      allRailings.filter((r: any) => r.floor === currentFloor - 1) : [];
+
+    const endTime = performance.now();
+    const totalObjects = [...currentFloorBuildings, ...floorBelowBuildings, 
+                          ...currentFloorPoles, ...floorBelowPoles,
+                          ...currentFloorPipeSupports, ...floorBelowPipeSupports].length;
+
+    setPerformanceMetrics({
+      totalObjectsChecked: allBuildings.length + allPoles.length + allSupports.length,
+      visibleObjectsReturned: totalObjects,
+      queryTimeMs: endTime - startTime,
+      fallbackUsed: true,
+      spatialIndexUsed: false,
+      lastUpdateTime: Date.now()
+    });
+
+    return {
+      buildings: [...currentFloorBuildings, ...floorBelowBuildings],
+      conveyorPoles: [...currentFloorPoles, ...floorBelowPoles],
+      pipeSupports: [...currentFloorPipeSupports, ...floorBelowPipeSupports],
+      conveyorBelts: [...currentFloorConveyors, ...floorBelowConveyors],
+      pipelines: [...currentFloorPipelines, ...floorBelowPipelines],
+      railways: [...currentFloorRailways, ...floorBelowRailways],
+      powerlineSegments: [...currentFloorPowerlineSegments, ...floorBelowPowerlineSegments],
+      foundations: [...currentFloorFoundations, ...floorBelowFoundations],
+      wallSegments: [...currentFloorWalls, ...floorBelowWalls],
+      railingSegments: [...currentFloorRailings, ...floorBelowRailings]
+    };
+  }, [buildings, conveyorPoles, pipeSupports, conveyorBelts, pipelines, railways, 
+      powerlineSegments, foundations, wallSegments, railingSegments, powerlines, 
+      currentFloor, showFloorBelow]);
+
+  // Rust-powered spatial query
+  const queryObjectsRust = useCallback(async (targetBounds: ViewportBounds) => {
+    const startTime = performance.now();
+
+    try {
+      // Calculate query center and radius from bounds
+      const centerX = (targetBounds.left + targetBounds.right) / 2;
+      const centerY = (targetBounds.top + targetBounds.bottom) / 2;
+      const radiusX = (targetBounds.right - targetBounds.left) / 2;
+      const radiusY = (targetBounds.bottom - targetBounds.top) / 2;
+      const queryRadius = Math.max(radiusX, radiusY) * RUST_QUERY_RADIUS_MULTIPLIER;
+
+      const queryCenter: Point3D = {
+        x: centerX,
+        y: centerY,
+        z: currentFloor * 4 // FLOOR_HEIGHT = 4
+      };
+
+      const queryOptions: SpatialQueryOptions = {
+        exclude_ids: [],
+        include_buildings: true,
+        include_railway_nodes: true,
+        include_conveyor_poles: true,
+        include_pipe_supports: true
+      };
+
+      // Use universal spatial query to get all nearby objects
+      const rustResult: UniversalSpatialResult = await universalSpatialQuery(
+        queryCenter, 
+        queryRadius, 
+        queryOptions
+      );
+
+      // Filter results by floor and exact viewport bounds
+      const filterByFloorAndBounds = (objects: any[], targetFloor: number) => {
+        return objects.filter((obj: any) => {
+          if (obj.floor !== targetFloor) return false;
+          
+          // For buildings, check building bounds
+          if (obj.type && obj.width && obj.depth) {
+            const left = obj.x;
+            const right = obj.x + obj.width;
+            const top = obj.y;
+            const bottom = obj.y + obj.depth;
+            return !(right < targetBounds.left || left > targetBounds.right || 
+                     bottom < targetBounds.top || top > targetBounds.bottom);
+          }
+          
+          // For point objects, check if point is in bounds (with small padding)
+          const padding = 2;
+          return obj.x >= targetBounds.left - padding && 
+                 obj.x <= targetBounds.right + padding && 
+                 obj.y >= targetBounds.top - padding && 
+                 obj.y <= targetBounds.bottom + padding;
+        });
+      };
+
+      // Apply floor filtering
+      const currentFloorBuildings = filterByFloorAndBounds(rustResult.buildings, currentFloor);
+      const currentFloorPoles = filterByFloorAndBounds(rustResult.conveyor_poles, currentFloor);  
+      const currentFloorPipeSupports = filterByFloorAndBounds(rustResult.pipe_supports, currentFloor);
+
+      const floorBelowBuildings = showFloorBelow ? 
+        filterByFloorAndBounds(rustResult.buildings, currentFloor - 1) : [];
+      const floorBelowPoles = showFloorBelow ? 
+        filterByFloorAndBounds(rustResult.conveyor_poles, currentFloor - 1) : [];
+      const floorBelowPipeSupports = showFloorBelow ? 
+        filterByFloorAndBounds(rustResult.pipe_supports, currentFloor - 1) : [];
+
+      // For linear infrastructure, we still need to filter from store (Rust spatial index doesn't handle these yet)
+      const allConveyors = Object.values(conveyorBelts);
+      const currentFloorConveyors = allConveyors.filter((belt: any) => belt.floor === currentFloor);
+      const floorBelowConveyors = showFloorBelow ? 
+        allConveyors.filter((belt: any) => belt.floor === currentFloor - 1) : [];
+
+      const allPipelines = Object.values(pipelines);
+      const currentFloorPipelines = allPipelines.filter((pipeline: any) => pipeline.floor === currentFloor);
+      const floorBelowPipelines = showFloorBelow ? 
+        allPipelines.filter((pipeline: any) => pipeline.floor === currentFloor - 1) : [];
+
+      const allRailways = Object.values(railways);
+      const currentFloorRailways = allRailways.filter((railway: any) => railway.floor === currentFloor);
+      const floorBelowRailways = showFloorBelow ? 
+        allRailways.filter((railway: any) => railway.floor === currentFloor - 1) : [];
+
+      // Powerline segments with map optimization
+      const segmentToPowerlineMap = new Map<string, { floor: number }>();
+      Object.values(powerlines).forEach((powerline: any) => {
+        powerline.segments.forEach((segmentId: string) => {
+          segmentToPowerlineMap.set(segmentId, { floor: powerline.floor });
+        });
+      });
+
+      const allPowerlineSegments = Object.values(powerlineSegments);
+      const currentFloorPowerlineSegments = allPowerlineSegments.filter((segment: any) => {
+        const powerline = segmentToPowerlineMap.get(segment.id);
+        return powerline && powerline.floor === currentFloor;
+      });
+      const floorBelowPowerlineSegments = showFloorBelow ? 
+        allPowerlineSegments.filter((segment: any) => {
+          const powerline = segmentToPowerlineMap.get(segment.id);
+          return powerline && powerline.floor === currentFloor - 1;
+        }) : [];
+
+      const allFoundations = Object.values(foundations);
+      const currentFloorFoundations = allFoundations.filter((f: any) => f.floor === currentFloor);
+      const floorBelowFoundations = showFloorBelow ? 
+        allFoundations.filter((f: any) => f.floor === currentFloor - 1) : [];
+
+      const allWalls = Object.values(wallSegments);
+      const currentFloorWalls = allWalls.filter((w: any) => w.floor === currentFloor);
+      const floorBelowWalls = showFloorBelow ? 
+        allWalls.filter((w: any) => w.floor === currentFloor - 1) : [];
+
+      const allRailings = Object.values(railingSegments);
+      const currentFloorRailings = allRailings.filter((r: any) => r.floor === currentFloor);
+      const floorBelowRailings = showFloorBelow ? 
+        allRailings.filter((r: any) => r.floor === currentFloor - 1) : [];
+
+      const endTime = performance.now();
+      const totalVisibleObjects = [...currentFloorBuildings, ...floorBelowBuildings, 
+                                   ...currentFloorPoles, ...floorBelowPoles,
+                                   ...currentFloorPipeSupports, ...floorBelowPipeSupports].length;
+
+      setPerformanceMetrics({
+        totalObjectsChecked: rustResult.buildings.length + rustResult.conveyor_poles.length + rustResult.pipe_supports.length,
+        visibleObjectsReturned: totalVisibleObjects,
+        queryTimeMs: endTime - startTime,
+        fallbackUsed: false,
+        spatialIndexUsed: true,
+        lastUpdateTime: Date.now()
+      });
+
+      return {
+        buildings: [...currentFloorBuildings, ...floorBelowBuildings],
+        conveyorPoles: [...currentFloorPoles, ...floorBelowPoles],
+        pipeSupports: [...currentFloorPipeSupports, ...floorBelowPipeSupports],
+        conveyorBelts: [...currentFloorConveyors, ...floorBelowConveyors],
+        pipelines: [...currentFloorPipelines, ...floorBelowPipelines],
+        railways: [...currentFloorRailways, ...floorBelowRailways],
+        powerlineSegments: [...currentFloorPowerlineSegments, ...floorBelowPowerlineSegments],
+        foundations: [...currentFloorFoundations, ...floorBelowFoundations],
+        wallSegments: [...currentFloorWalls, ...floorBelowWalls],
+        railingSegments: [...currentFloorRailings, ...floorBelowRailings]
+      };
+
+    } catch (error) {
+      handleRustError(error, 'spatial query');
+      return filterObjectsFallback(targetBounds);
+    }
+  }, [currentFloor, showFloorBelow, conveyorBelts, pipelines, railways, powerlineSegments, 
+      foundations, wallSegments, railingSegments, powerlines, filterObjectsFallback]);
+
+  // Update visible objects when bounds change significantly
+  const updateVisibleObjects = useCallback(async (targetBounds: ViewportBounds) => {
+    if (!hasSignificantViewportChange(targetBounds)) {
+      return; // Skip update if change is insignificant
+    }
+
+    lastBoundsRef.current = targetBounds;
+
+    try {
+      let newVisibleObjects: ViewportObjects;
+      
+      if (isRustAvailable) {
+        newVisibleObjects = await queryObjectsRust(targetBounds);
+      } else {
+        newVisibleObjects = filterObjectsFallback(targetBounds);
+      }
+      
+      setVisibleObjects(newVisibleObjects);
+    } catch (error) {
+      handleRustError(error, 'viewport update');
+      // Fallback to frontend filtering on any error
+      const fallbackObjects = filterObjectsFallback(targetBounds);
+      setVisibleObjects(fallbackObjects);
+    }
+  }, [hasSignificantViewportChange, isRustAvailable, queryObjectsRust, filterObjectsFallback]);
+
+  // Debounced viewport update
+  const debouncedUpdateVisibleObjects = useCallback((targetBounds: ViewportBounds) => {
+    if (updateDebounceRef.current) {
+      clearTimeout(updateDebounceRef.current);
+    }
+    
+    updateDebounceRef.current = setTimeout(() => {
+      updateVisibleObjects(targetBounds);
+    }, 16); // ~60fps update rate
+  }, [updateVisibleObjects]);
+
+  // Check Rust availability on mount
+  useEffect(() => {
+    const checkRustAvailability = async () => {
+      try {
+        // Check if we have ANY Rust backend (Tauri OR HTTP Bridge)
+        const { isRustBackendAvailable } = await import('../tauri/environment');
+        const hasRust = await isRustBackendAvailable();
+        
+        if (hasRust) {
+          // Test spatial query to verify Rust backend is working
+          await getSpatialStats();
+          setIsRustAvailable(true);
+          console.log('Viewport system: Rust backend available via HTTP bridge, using spatial indexing');
+        } else {
+          setIsRustAvailable(false);
+          console.log('Viewport system: No Rust backend, using fallback filtering');
+        }
+      } catch (error) {
+        console.warn('Viewport system: Rust backend check failed, using fallback:', error);
+        setIsRustAvailable(false);
+      }
+    };
+
+    checkRustAvailability();
+  }, []);
+
+  // Update when bounds change
+  useEffect(() => {
+    debouncedUpdateVisibleObjects(bounds);
+  }, [bounds, currentFloor, showFloorBelow, debouncedUpdateVisibleObjects]);
+
+  // Cleanup debounce on unmount
+  useEffect(() => {
+    return () => {
+      if (updateDebounceRef.current) {
+        clearTimeout(updateDebounceRef.current);
+      }
+    };
+  }, []);
+
+  return {
+    visibleObjects,
+    performanceMetrics,
+    isRustAvailable,
+    // Expose update function for manual cache invalidation
+    invalidateCache: () => {
+      lastBoundsRef.current = null;
+      updateVisibleObjects(bounds);
+    }
+  };
+};

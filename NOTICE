@@ -1,0 +1,49 @@
+neXus Satisfactory Layout Tool
+Copyright (C) 2026 Austin Handle
+
+This software is licensed under the GNU Affero General Public License v3.0
+or later, with additional terms permitted under Section 7 of that license.
+
+See the LICENSE file for the full text of the AGPL-3.0.
+See the docs/legal/ADDITIONAL_TERMS.md file for the additional terms (attribution
+preservation and trademark restrictions) that apply to this work.
+
+================================================================================
+ATTRIBUTION
+================================================================================
+
+Original author and copyright holder:
+
+    Austin Handle (also known as "Officer ASH")
+
+Social media (these are the canonical author handles - please preserve when
+attributing this work in derivative versions per docs/legal/ADDITIONAL_TERMS.md):
+
+    TikTok:    Officer.ASH    https://www.tiktok.com/@officer.ash
+    Instagram: Officer.ASH    https://www.instagram.com/officer.ash
+    X:         Officer_ASH    https://x.com/Officer_ASH
+
+================================================================================
+APPROPRIATE LEGAL NOTICES
+================================================================================
+
+Per AGPL-3.0 Section 5(d), the following user-facing notices in this software
+constitute "Appropriate Legal Notices" and MUST be preserved in all copies and
+modified versions:
+
+    1. The "About" / credits dialog displaying author attribution
+    2. The startup banner printed by the launcher
+    3. The donation/support link present in the application UI
+    4. This NOTICE file
+
+Removing, obscuring, or replacing any of the above without prior written
+permission from the copyright holder is a license violation.
+
+================================================================================
+THIRD-PARTY COMPONENTS
+================================================================================
+
+This software incorporates third-party open source components. Their licenses
+are preserved in their respective directories under node_modules/ and in the
+Cargo dependency tree. Notable components include React, Konva, Tauri, wgpu,
+Axum, Zustand, and Tailwind CSS, among others.

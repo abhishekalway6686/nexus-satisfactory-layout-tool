@@ -1,0 +1,228 @@
+import { useCallback, useRef } from 'react';
+import { Point3D } from '../types';
+import { isTauriEnvironment } from '../tauri/environment';
+import * as tauriCommands from '../tauri/commands';
+import { distance3D as jsDistance3D } from '../utils/helpers';
+import { shouldCreateTurn as jsShouldCreateTurn, calculateCurveControlPoint as jsCalculateCurveControlPoint } from '../logic/common/curveUtils';
+
+// Error tracking interface
+interface ErrorMetrics {
+  [command: string]: {
+    count: number;
+    lastError: string;
+    lastErrorTime: number;
+  };
+}
+
+/**
+ * Hook to use Tauri commands with fallback to JavaScript implementations
+ * This ensures the app works in both Tauri and web environments
+ */
+export const useTauriCommands = () => {
+  const isTauri = isTauriEnvironment();
+  const errorMetrics = useRef<ErrorMetrics>({});
+  
+  // Helper function to track errors
+  const trackError = useCallback((command: string, error: any) => {
+    const errorMessage = error?.message || String(error);
+    errorMetrics.current[command] = {
+      count: (errorMetrics.current[command]?.count || 0) + 1,
+      lastError: errorMessage,
+      lastErrorTime: Date.now(),
+    };
+    
+    // Log to console for debugging
+    console.warn(`Tauri command '${command}' failed (${errorMetrics.current[command].count} times):`, errorMessage);
+    
+    // If a command fails too many times, we could disable it temporarily
+    if (errorMetrics.current[command].count > 10) {
+      console.error(`Command '${command}' has failed ${errorMetrics.current[command].count} times. Consider checking Rust backend.`);
+    }
+  }, []);
+
+  // Distance calculation with fallback
+  const calculateDistance3D = useCallback(async (p1: Point3D, p2: Point3D): Promise<number> => {
+    if (isTauri) {
+      try {
+        return await tauriCommands.calculateDistance3D(p1, p2);
+      } catch (error) {
+        trackError('calculateDistance3D', error);
+      }
+    }
+    return jsDistance3D(p1, p2);
+  }, [isTauri]);
+
+  // Bulk distance calculation
+  const calculateDistancesBulk = useCallback(async (pointsA: Point3D[], pointsB: Point3D[]): Promise<number[]> => {
+    if (isTauri) {
+      try {
+        return await tauriCommands.calculateDistancesBulk(pointsA, pointsB);
+      } catch (error) {
+        trackError('calculateDistancesBulk', error);
+      }
+    }
+    // Fallback to JS implementation
+    return pointsA.map((p1, i) => jsDistance3D(p1, pointsB[i]));
+  }, [isTauri]);
+
+  // Curve control point generation
+  const generateCurveControlPoint = useCallback(async (
+    start: Point3D, 
+    end: Point3D, 
+    curveHeightFactor: number = 0.5
+  ): Promise<Point3D | null> => {
+    if (isTauri) {
+      try {
+        return await tauriCommands.generateCurveControlPoint(start, end, curveHeightFactor);
+      } catch (error) {
+        trackError('generateCurveControlPoint', error);
+      }
+    }
+    // For JS fallback, we need a middle point to use the existing function
+    const middle: Point3D = {
+      x: (start.x + end.x) / 2,
+      y: (start.y + end.y) / 2,
+      z: (start.z + end.z) / 2,
+    };
+    return jsCalculateCurveControlPoint(start, middle, end);
+  }, [isTauri]);
+
+  // Bezier interpolation
+  const interpolateBezierCurve = useCallback(async (
+    start: Point3D,
+    end: Point3D,
+    control: Point3D,
+    t: number
+  ): Promise<Point3D> => {
+    if (isTauri) {
+      try {
+        return await tauriCommands.interpolateBezierCurve(start, end, control, t);
+      } catch (error) {
+        trackError('interpolateBezierCurve', error);
+      }
+    }
+    // JS fallback implementation
+    const t1 = 1 - t;
+    return {
+      x: t1 * t1 * start.x + 2 * t1 * t * control.x + t * t * end.x,
+      y: t1 * t1 * start.y + 2 * t1 * t * control.y + t * t * end.y,
+      z: t1 * t1 * start.z + 2 * t1 * t * control.z + t * t * end.z,
+    };
+  }, [isTauri]);
+
+  // Turn detection
+  const shouldCreateTurn = useCallback(async (p1: Point3D, p2: Point3D, p3: Point3D): Promise<boolean> => {
+    if (isTauri) {
+      try {
+        return await tauriCommands.shouldCreateTurn(p1, p2, p3);
+      } catch (error) {
+        trackError('shouldCreateTurn', error);
+      }
+    }
+    // Convert to 2D points for JS implementation
+    return jsShouldCreateTurn(
+      { x: p1.x, y: p1.y },
+      { x: p2.x, y: p2.y },
+      { x: p3.x, y: p3.y }
+    );
+  }, [isTauri]);
+
+  // Line intersection
+  const findLineIntersection = useCallback(async (
+    line1Start: Point3D,
+    line1End: Point3D,
+    line2Start: Point3D,
+    line2End: Point3D
+  ): Promise<{ point: Point3D; t1: number; t2: number } | null> => {
+    if (isTauri) {
+      try {
+        return await tauriCommands.findLineIntersection(line1Start, line1End, line2Start, line2End);
+      } catch (error) {
+        trackError('findLineIntersection', error);
+      }
+    }
+    // JS fallback - basic 2D line intersection
+    const dx1 = line1End.x - line1Start.x;
+    const dy1 = line1End.y - line1Start.y;
+    const dx2 = line2End.x - line2Start.x;
+    const dy2 = line2End.y - line2Start.y;
+    
+    const denom = dx1 * dy2 - dy1 * dx2;
+    if (Math.abs(denom) < 0.001) return null; // Parallel lines
+    
+    const t1 = ((line2Start.x - line1Start.x) * dy2 - (line2Start.y - line1Start.y) * dx2) / denom;
+    const t2 = ((line2Start.x - line1Start.x) * dy1 - (line2Start.y - line1Start.y) * dx1) / denom;
+    
+    if (t1 >= 0 && t1 <= 1 && t2 >= 0 && t2 <= 1) {
+      return {
+        point: {
+          x: line1Start.x + t1 * dx1,
+          y: line1Start.y + t1 * dy1,
+          z: (line1Start.z + line1End.z) / 2, // Average Z for 2D intersection
+        },
+        t1,
+        t2,
+      };
+    }
+    
+    return null;
+  }, [isTauri, trackError]);
+  
+  // New function: Calculate bezier curve length
+  const calculateBezierLength = useCallback(async (
+    start: Point3D,
+    end: Point3D,
+    control: Point3D,
+    samples: number = 100
+  ): Promise<number> => {
+    if (isTauri) {
+      try {
+        // Try to use a direct Rust implementation if available
+        return await tauriCommands.invoke<number>('calculate_bezier_length', {
+          start,
+          end,
+          control,
+          samples,
+        });
+      } catch (error) {
+        trackError('calculateBezierLength', error);
+      }
+    }
+    
+    // JS fallback: Sample the curve and sum distances
+    let length = 0;
+    let prevPoint = start;
+    
+    for (let i = 1; i <= samples; i++) {
+      const t = i / samples;
+      const point = await interpolateBezierCurve(start, end, control, t);
+      length += jsDistance3D(prevPoint, point);
+      prevPoint = point;
+    }
+    
+    return length;
+  }, [isTauri, interpolateBezierCurve, trackError]);
+  
+  // Function to get error report
+  const getErrorReport = useCallback(() => {
+    return { ...errorMetrics.current };
+  }, []);
+  
+  // Function to reset error metrics
+  const resetErrorMetrics = useCallback(() => {
+    errorMetrics.current = {};
+  }, []);
+
+  return {
+    calculateDistance3D,
+    calculateDistancesBulk,
+    generateCurveControlPoint,
+    interpolateBezierCurve,
+    shouldCreateTurn,
+    findLineIntersection,
+    calculateBezierLength,
+    // Error tracking utilities
+    getErrorReport,
+    resetErrorMetrics,
+  };
+};

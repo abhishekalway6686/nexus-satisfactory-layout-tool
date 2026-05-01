@@ -1,0 +1,200 @@
+[
+  {
+    "version": "2.0.0",
+    "date": "2026-05-01",
+    "sections": [
+      {
+        "type": "changed",
+        "items": [
+          "Open-sourced under AGPL-3.0-or-later with attribution-preservation terms",
+          "Removed the closed beta system: no beta keys, no login required",
+          "Removed analytics and session recording",
+          "App now launches directly to the canvas — no gates, no agreements"
+        ]
+      },
+      {
+        "type": "added",
+        "items": [
+          "Public source code on GitHub",
+          "Contributing guide, security policy, and code of conduct"
+        ]
+      }
+    ]
+  },
+  {
+    "version": "2.0.0-beta.5",
+    "date": "2026-02-04",
+    "sections": [
+      {
+        "type": "added",
+        "items": [
+          "Production simulation system - real-time material flow calculations",
+          "Power system - complete powerline drawing and power simulation",
+          "L-shaped powerline routing toggle in toolbar",
+          "Production Panel - factory overview with health score, power, fluids, and issues",
+          "Draggable Production Panel - move freely when unpinned",
+          "Production overlays - badges on buildings showing efficiency percentages",
+          "Conveyor/pipeline flow overlays with rates and bottleneck highlighting",
+          "Miner/extractor resource extraction tracking",
+          "Conveyor belt animations with directional flow",
+          "Error boundary - graceful crash recovery",
+          "Recipe selection system for building recipes",
+          "Enhanced train station visuals with tracks, platforms, cargo areas"
+        ]
+      },
+      {
+        "type": "changed",
+        "items": [
+          "Grid snapping changed from 0.5m to 4m to match visible grid",
+          "Input/output port chevrons fixed to show correct flow direction",
+          "Fluid overlay badges redesigned for better readability",
+          "Rust viewport system integrated for smoother dragging"
+        ]
+      },
+      {
+        "type": "fixed",
+        "items": [
+          "Critical: Canvas drag FPS - fixed drop from 60fps to 10fps",
+          "Critical: Mouse hover performance - fixed FPS drop from 61fps to 20fps",
+          "Zoom/scroll wheel lag eliminated",
+          "Viewport culling issues during pan",
+          "Pipe curves now use tight elbows instead of long bezier curves",
+          "Delete key now works for railways, conveyors, and pipes",
+          "Resizable side panels - drag to resize Building Palette and Properties Panel",
+          "Miners no longer show 'Idle' when producing",
+          "Chevron direction on ports now correctly shows material flow",
+          "Issues #1-4: Building labels, splitter drag area, grid snapping, submenu clicks"
+        ]
+      }
+    ]
+  },
+  {
+    "version": "2.0.0-beta.4",
+    "date": "2026-02-04",
+    "sections": [
+      {
+        "type": "added",
+        "items": [
+          "Powerline visibility toggle - Show, Semi-transparent, or Hide modes",
+          "Powerline right-angle (L-shaped) routing mode",
+          "Building height blocking - tall buildings block floors above"
+        ]
+      },
+      {
+        "type": "changed",
+        "items": [
+          "Train station dimensions corrected to match Satisfactory",
+          "Grid snapping threshold increased to 50%"
+        ]
+      },
+      {
+        "type": "fixed",
+        "items": [
+          "Conveyor belt nodes now visible after drawing",
+          "Powerline connection snapping uses correct world position",
+          "Rotating buildings updates powerline endpoints",
+          "Railway track selection improved with invisible hit area",
+          "Railway preview uses same curve calculation as final render"
+        ]
+      }
+    ]
+  },
+  {
+    "version": "2.0.0-beta.3",
+    "date": "2026-02-02",
+    "sections": [
+      {
+        "type": "added",
+        "items": [
+          "Conveyor belt endpoint nodes - clickable \"Free End\" indicators for unconnected belts",
+          "Power connections for train stations (Train Station, Freight Platform, Fluid Freight Platform)",
+          "Power pole visual enhancements - lightning icon, capacity badges, status rings",
+          "Powerline calculator architecture design for future power flow calculations",
+          "Release notes management system with JSON data and CLI script"
+        ]
+      },
+      {
+        "type": "changed",
+        "items": [
+          "Connection point colors now match Satisfactory (Inputs=Orange, Outputs=Green)",
+          "Building colors overhauled to match industrial aesthetic",
+          "Railway rendering uses two-layer system for tracks through stations",
+          "Floor selector repositioned next to fullscreen button",
+          "Building label fonts use bold modern styling instead of shadows"
+        ]
+      },
+      {
+        "type": "fixed",
+        "items": [
+          "Powerline visibility - fixed ID format mismatch preventing rendering",
+          "Sticky notes no longer delete while typing",
+          "Sticky notes maintain color during editing",
+          "Connection point arrows rotate correctly with buildings",
+          "Context menu submenus no longer close prematurely"
+        ]
+      }
+    ]
+  },
+  {
+    "version": "2.0.0-beta.2",
+    "date": "2026-01-13",
+    "sections": [
+      {
+        "type": "added",
+        "items": [
+          "Auto-update system with download progress indicator",
+          "File size validation for layout imports (50 MB limit)",
+          "Update notification UI with version info and release notes",
+          "\"Check for Updates\" menu item in Help menu"
+        ]
+      },
+      {
+        "type": "changed",
+        "items": [
+          "Help menu now includes update checking functionality",
+          "CSP configuration updated for GitHub API connections"
+        ]
+      },
+      {
+        "type": "fixed",
+        "items": [
+          "Security: Replaced eval() with safer Function constructor",
+          "Security: Added noopener,noreferrer to external links",
+          "Fixed placeholder GitHub URLs in feedback components",
+          "About dialog now shows dynamic version",
+          "Fixed 5 security vulnerabilities in dependencies"
+        ]
+      },
+      {
+        "type": "security",
+        "items": [
+          "Created MIT LICENSE file",
+          "Added centralized version management",
+          "Improved external link security"
+        ]
+      }
+    ]
+  },
+  {
+    "version": "2.0.0-beta.1",
+    "date": "2026-01-12",
+    "sections": [
+      {
+        "type": "added",
+        "items": [
+          "Multi-floor support with 4-meter spacing",
+          "Railway system with automatic curve generation",
+          "Conveyor belt system with smooth curves",
+          "Pipe system for fluid pipelines",
+          "Building palette with comprehensive library",
+          "Properties panel for editing buildings",
+          "Sticky notes for annotations",
+          "Keyboard shortcuts for efficient workflow",
+          "Undo/Redo support",
+          "Save/Load layouts as JSON",
+          "Dark theme optimized for extended use"
+        ]
+      }
+    ]
+  }
+]

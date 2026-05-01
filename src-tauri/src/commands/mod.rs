@@ -1,0 +1,16 @@
+#[cfg(feature = "tauri-mode")]
+pub mod geometry;
+#[cfg(feature = "tauri-mode")]
+pub mod buildings;
+#[cfg(feature = "tauri-mode")]
+pub mod spatial;
+#[cfg(feature = "tauri-mode")]
+pub mod infrastructure;
+#[cfg(feature = "tauri-mode")]
+pub mod serialization;
+#[cfg(feature = "tauri-mode")]
+pub mod benchmark;
+#[cfg(feature = "tauri-mode")]
+pub mod viewport;
+#[cfg(feature = "standalone")]
+pub mod standalone;

@@ -1,0 +1,407 @@
+// Tauri integration adapter for the layout store
+import { LayoutState } from '../types';
+import { isTauriEnvironment, PerformanceConfig } from '../tauri/environment';
+import * as TauriCommands from '../tauri/commands';
+import * as ExtendedCommands from '../tauri/commandsExtended';
+import { listenToLayoutEvents, setStoreInstance as setEventStoreInstance } from '../tauri/events';
+import { HybridCalculations } from '../utils/hybridCalculations';
+
+// Export store instance setter for initialization
+export { setEventStoreInstance as setStoreInstance };
+
+// Debounce utility for batching operations
+function debounce<T extends (...args: any[]) => any>(
+  func: T,
+  wait: number
+): (...args: Parameters<T>) => void {
+  let timeout: NodeJS.Timeout;
+  return (...args: Parameters<T>) => {
+    clearTimeout(timeout);
+    timeout = setTimeout(() => func(...args), wait);
+  };
+}
+
+// Batch accumulator for efficient updates
+class BatchOperationManager {
+  private buildingUpdates: Map<string, { position?: any; rotation?: number }> = new Map();
+  private conveyorCreations: any[] = [];
+  private pipeCreations: any[] = [];
+  
+  private flushTimeout: NodeJS.Timeout | null = null;
+  
+  addBuildingUpdate(id: string, update: { position?: any; rotation?: number }) {
+    const existing = this.buildingUpdates.get(id) || {};
+    this.buildingUpdates.set(id, { ...existing, ...update });
+    this.scheduleFlush();
+  }
+  
+  addConveyorCreation(conveyor: any) {
+    this.conveyorCreations.push(conveyor);
+    this.scheduleFlush();
+  }
+  
+  addPipeCreation(pipe: any) {
+    this.pipeCreations.push(pipe);
+    this.scheduleFlush();
+  }
+  
+  private scheduleFlush() {
+    if (this.flushTimeout) return;
+    
+    this.flushTimeout = setTimeout(() => {
+      this.flush();
+    }, PerformanceConfig.saveDebounceMs);
+  }
+  
+  async flush() {
+    if (this.flushTimeout) {
+      clearTimeout(this.flushTimeout);
+      this.flushTimeout = null;
+    }
+    
+    // Send batched building updates
+    if (this.buildingUpdates.size > 0) {
+      const updates = Array.from(this.buildingUpdates.entries()).map(([id, update]) => ({
+        id,
+        ...update
+      }));
+      
+      try {
+        await ExtendedCommands.updateBuildingsBatch(updates);
+      } catch (error) {
+        console.error('Failed to batch update buildings:', error);
+      }
+      
+      this.buildingUpdates.clear();
+    }
+    
+    // Send batched conveyor creations
+    if (this.conveyorCreations.length > 0) {
+      try {
+        await ExtendedCommands.createConveyorsBatch(this.conveyorCreations);
+      } catch (error) {
+        console.error('Failed to batch create conveyors:', error);
+      }
+      
+      this.conveyorCreations = [];
+    }
+    
+    // Send batched pipe creations
+    if (this.pipeCreations.length > 0) {
+      try {
+        await ExtendedCommands.createPipesBatch(this.pipeCreations);
+      } catch (error) {
+        console.error('Failed to batch create pipes:', error);
+      }
+      
+      this.pipeCreations = [];
+    }
+  }
+}
+
+// Store enhancement functions
+export function createTauriStoreEnhancer(set: any, get: () => LayoutState) {
+  const batchManager = new BatchOperationManager();
+  
+  // Setup event listeners for real-time updates from Rust
+  if (isTauriEnvironment()) {
+    listenToLayoutEvents((event) => {
+      switch (event.type) {
+        case 'BuildingCreated':
+          // Sync new building from Rust to React state
+          if (event.buildingId) {
+            TauriCommands.getBuilding(event.buildingId).then(building => {
+              if (building) {
+                set((state: LayoutState) => ({
+                  buildings: {
+                    ...state.buildings,
+                    [building.id]: {
+                      ...building,
+                      x: building.position.x,
+                      y: building.position.y,
+                      z: building.position.z,
+                      type: building.buildingType,
+                    }
+                  }
+                }));
+              }
+            });
+          }
+          break;
+          
+        case 'BuildingUpdated':
+          // Sync building updates from Rust
+          if (event.buildingId) {
+            const currentBuilding = get().buildings[event.buildingId];
+            if (currentBuilding) {
+              TauriCommands.getBuilding(event.buildingId).then(building => {
+                if (building) {
+                  set((state: LayoutState) => ({
+                    buildings: {
+                      ...state.buildings,
+                      [building.id]: {
+                        ...currentBuilding,
+                        x: building.position.x,
+                        y: building.position.y,
+                        z: building.position.z,
+                        rotation: building.rotation,
+                      }
+                    }
+                  }));
+                }
+              });
+            }
+          }
+          break;
+          
+        case 'BuildingDeleted':
+          // Remove building from React state
+          if (event.buildingId) {
+            set((state: LayoutState) => {
+              const { [event.buildingId]: _, ...remainingBuildings } = state.buildings;
+              return { buildings: remainingBuildings };
+            });
+          }
+          break;
+      }
+    });
+  }
+  
+  // Return enhanced actions
+  return {
+    // Building operations with Tauri integration
+    addBuildingWithTauri: async (building: any) => {
+      if (isTauriEnvironment()) {
+        try {
+          const createdBuilding = await TauriCommands.createBuilding(
+            building.id,
+            building.type,
+            { x: building.x, y: building.y, z: building.z }
+          );
+          
+          // Update local state with response from Rust
+          set((state: LayoutState) => ({
+            buildings: {
+              ...state.buildings,
+              [createdBuilding.id]: {
+                ...building,
+                x: createdBuilding.position.x,
+                y: createdBuilding.position.y,
+                z: createdBuilding.position.z,
+              }
+            }
+          }));
+          
+          return createdBuilding;
+        } catch (error) {
+          console.error('Failed to create building in Tauri:', error);
+          // Fallback to local state update
+        }
+      }
+      
+      // Original implementation for web
+      set((state: LayoutState) => ({
+        buildings: { ...state.buildings, [building.id]: building }
+      }));
+      
+      return building;
+    },
+    
+    updateBuildingPositionWithTauri: (id: string, x: number, y: number) => {
+      // Update local state immediately for responsiveness
+      set((state: LayoutState) => ({
+        buildings: {
+          ...state.buildings,
+          [id]: { ...state.buildings[id], x, y }
+        }
+      }));
+      
+      // Queue Tauri update
+      if (isTauriEnvironment()) {
+        const building = get().buildings[id];
+        if (building) {
+          batchManager.addBuildingUpdate(id, {
+            position: { x, y, z: building.z }
+          });
+        }
+      }
+    },
+    
+    updateBuildingRotationWithTauri: (id: string, rotation: number) => {
+      // Update local state immediately
+      set((state: LayoutState) => ({
+        buildings: {
+          ...state.buildings,
+          [id]: { ...state.buildings[id], rotation }
+        }
+      }));
+      
+      // Queue Tauri update
+      if (isTauriEnvironment()) {
+        batchManager.addBuildingUpdate(id, { rotation });
+      }
+    },
+    
+    deleteBuildingWithTauri: async (id: string) => {
+      // Remove from local state immediately
+      set((state: LayoutState) => {
+        const { [id]: _, ...remainingBuildings } = state.buildings;
+        return { buildings: remainingBuildings };
+      });
+      
+      // Send delete command to Tauri
+      if (isTauriEnvironment()) {
+        try {
+          await TauriCommands.deleteBuilding(id);
+        } catch (error) {
+          console.error('Failed to delete building in Tauri:', error);
+        }
+      }
+    },
+    
+    // Spatial queries using Tauri's optimized index
+    findBuildingsInAreaWithTauri: async (
+      minX: number,
+      minY: number,
+      maxX: number,
+      maxY: number,
+      floor: number
+    ): Promise<string[]> => {
+      if (isTauriEnvironment()) {
+        try {
+          return await ExtendedCommands.findBuildingsInArea(
+            minX, minY, maxX, maxY, floor
+          );
+        } catch (error) {
+          console.error('Tauri spatial query failed:', error);
+        }
+      }
+      
+      // Fallback to JS implementation
+      const buildings = get().buildings;
+      return Object.keys(buildings).filter(id => {
+        const b = buildings[id];
+        return b.x >= minX && b.x <= maxX && 
+               b.y >= minY && b.y <= maxY && 
+               b.z === floor * 4; // FLOOR_HEIGHT
+      });
+    },
+    
+    // Save/Load operations
+    saveLayoutWithTauri: async () => {
+      if (isTauriEnvironment()) {
+        // Ensure all pending operations are flushed
+        await batchManager.flush();
+        
+        const filePath = await ExtendedCommands.saveLayoutFile();
+        return filePath;
+      }
+      
+      // Fallback to browser download
+      const state = get();
+      const data = JSON.stringify({
+        buildings: state.buildings,
+        conveyorSystems: state.conveyorSystems,
+        pipeSystems: state.pipeSystems,
+        railways: state.railways,
+        stickyNotes: state.stickyNotes,
+      });
+      
+      const blob = new Blob([data], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'layout.slt';
+      a.click();
+      URL.revokeObjectURL(url);
+      
+      return null;
+    },
+    
+    loadLayoutWithTauri: async () => {
+      if (isTauriEnvironment()) {
+        const filePath = await ExtendedCommands.openLayoutFile();
+        if (filePath) {
+          // The Tauri backend will handle loading and emit events
+          // to update the React state
+          return true;
+        }
+        return false;
+      }
+      
+      // Fallback to browser file input
+      return new Promise<boolean>((resolve) => {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.slt,.json';
+        
+        input.onchange = async (e) => {
+          const file = (e.target as HTMLInputElement).files?.[0];
+          if (file) {
+            const text = await file.text();
+            const data = JSON.parse(text);
+            
+            set({
+              buildings: data.buildings || {},
+              conveyorSystems: data.conveyorSystems || {},
+              pipeSystems: data.pipeSystems || {},
+              railways: data.railways || {},
+              stickyNotes: data.stickyNotes || {},
+            });
+            
+            resolve(true);
+          } else {
+            resolve(false);
+          }
+        };
+        
+        input.click();
+      });
+    },
+    
+    // Performance monitoring
+    getPerformanceStats: async () => {
+      if (isTauriEnvironment()) {
+        const stats = await TauriCommands.getPerformanceStats();
+        const comparison = HybridCalculations.getPerformanceComparison();
+        
+        return {
+          ...stats,
+          methodComparison: Array.from(comparison.entries())
+        };
+      }
+      
+      return null;
+    },
+    
+    // Cleanup
+    cleanup: () => {
+      batchManager.flush();
+    }
+  };
+}
+
+// Keyboard shortcuts for desktop
+export function setupDesktopKeyboardShortcuts(actions: any) {
+  if (!isTauriEnvironment()) return;
+  
+  window.addEventListener('keydown', async (e) => {
+    // Ctrl/Cmd + S: Save
+    if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+      e.preventDefault();
+      await actions.saveLayoutWithTauri();
+    }
+    
+    // Ctrl/Cmd + O: Open
+    if ((e.ctrlKey || e.metaKey) && e.key === 'o') {
+      e.preventDefault();
+      await actions.loadLayoutWithTauri();
+    }
+    
+    // Ctrl/Cmd + Shift + S: Save As
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'S') {
+      e.preventDefault();
+      await actions.saveLayoutWithTauri();
+    }
+  });
+}

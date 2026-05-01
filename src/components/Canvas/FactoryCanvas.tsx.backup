@@ -1,0 +1,2007 @@
+// src/components/Canvas/FactoryCanvas.tsx
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { Stage, Layer, Circle, Group } from 'react-konva';
+import { motion } from 'framer-motion';
+import { ZoomIn, ZoomOut } from 'lucide-react';
+import { useShallow } from 'zustand/react/shallow';
+import { GridBackground } from './GridBackground';
+import { BuildingShape } from '../Buildings/BuildingShape';
+import { ConveyorPoleShape } from '../Conveyors/ConveyorPoleShape';
+import { ConveyorBeltShape } from '../Conveyors/ConveyorBeltShape';
+import { ConveyorLiftShape } from '../Conveyors/ConveyorLiftShape';
+import { PipeSupportShape } from '../Pipes/PipeSupportShape';
+import { PipelineShape } from '../Pipes/PipelineShape';
+import { PipeFloorConnectionShape } from '../Pipes/PipeFloorConnectionShape';
+import { StickyNoteShape } from '../StickyNotes/StickyNoteShape';
+import { RailwayShape } from '../Transport/RailwayShape';
+import { RailwayDebugOverlay } from '../Transport/RailwayDebugOverlay';
+import { FoundationShape } from '../Architecture/FoundationShape';
+import { WallShape } from '../Architecture/WallShape';
+import { RailwayDrawingPreview } from './RailwayDrawingPreview';
+import { ConveyorDrawingPreview } from './ConveyorDrawingPreview';
+import { PipeDrawingPreview } from './PipeDrawingPreview';
+import { FoundationDrawingPreview } from './FoundationDrawingPreview';
+import { WallDrawingPreview } from './WallDrawingPreview';
+import { OverlayToolbar } from '../UI/OverlayToolbar';
+import { MobileDrawingControls } from '../UI/MobileDrawingControls';
+import { useLayoutStore } from '../../store/layoutStore';
+import { createNodeAtPoint } from '../../logic/railway';
+import { usePerformanceMode } from '../../hooks/usePerformanceMode';
+import { ConveyorPole, Building, PipeSupport, Point3D, ConveyorLift, PipeFloorConnection } from '../../types';
+import { 
+  BUILDING_TYPES, 
+  PIXELS_PER_METER, 
+  GRID_SIZE, 
+  CANVAS_HEIGHT, 
+  MIN_ZOOM, 
+  MAX_ZOOM, 
+  FLOOR_HEIGHT,
+  CONVEYOR_LIFT_BASE_COSTS,
+  PIPE_FLOOR_CONNECTION_BASE_COSTS
+} from '../../constants';
+
+interface AnimatedButtonProps {
+  children: React.ReactNode;
+  className?: string;
+  onClick?: () => void;
+  whileHover?: any;
+  whileTap?: any;
+  type?: 'button' | 'submit' | 'reset';
+}
+
+const AnimatedButton: React.FC<AnimatedButtonProps> = ({ 
+  children, 
+  className, 
+  onClick, 
+  whileHover, 
+  whileTap, 
+  type = 'button' 
+}) => {
+  const MotionButton = motion.button as any;
+  return (
+    <MotionButton
+      whileHover={whileHover}
+      whileTap={whileTap}
+      className={className}
+      onClick={onClick}
+      type={type}
+    >
+      {children}
+    </MotionButton>
+  );
+};
+
+// Performance-based throttle utilities
+const throttle = (func: Function, limit: number) => {
+  let inThrottle: boolean;
+  return function(this: any) {
+    const args = arguments;
+    const context = this;
+    if (!inThrottle) {
+      func.apply(context, args);
+      inThrottle = true;
+      setTimeout(() => inThrottle = false, limit);
+    }
+  }
+};
+
+// Smooth zoom with requestAnimationFrame and better synchronization
+const createSmoothZoom = () => {
+  let zoomFrame: number | null = null;
+  let pendingZoom: {
+    scale: number;
+    position: { x: number; y: number };
+  } | null = null;
+
+  return (scale: number, position: { x: number; y: number }, callback: (scale: number, pos: { x: number; y: number }) => void, onComplete?: () => void) => {
+    pendingZoom = { scale, position };
+    
+    if (zoomFrame) return; // Already have a frame scheduled
+    
+    zoomFrame = requestAnimationFrame(() => {
+      if (pendingZoom) {
+        callback(pendingZoom.scale, pendingZoom.position);
+        pendingZoom = null;
+        // Call completion callback after state update
+        if (onComplete) {
+          // Use another frame to ensure state has propagated
+          requestAnimationFrame(onComplete);
+        }
+      }
+      zoomFrame = null;
+    });
+  };
+};
+
+// Memoized components for better performance
+const MemoizedBuildingShape = React.memo(BuildingShape);
+const MemoizedConveyorPoleShape = React.memo(ConveyorPoleShape);
+const MemoizedConveyorBeltShape = React.memo(ConveyorBeltShape);
+const MemoizedConveyorLiftShape = React.memo(ConveyorLiftShape);
+const MemoizedPipeSupportShape = React.memo(PipeSupportShape);
+const MemoizedPipelineShape = React.memo(PipelineShape);
+const MemoizedPipeFloorConnectionShape = React.memo(PipeFloorConnectionShape);
+const MemoizedStickyNoteShape = React.memo(StickyNoteShape);
+const MemoizedRailwayShape = React.memo(RailwayShape);
+
+// Touch/mouse event helpers
+const isTouchDevice = () => {
+  return 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+};
+
+// Optimized store selectors
+const useOptimizedStore = () => {
+  // Use useShallow to prevent unnecessary re-renders from object comparison
+  return useLayoutStore(
+    useShallow(state => ({
+      buildings: state.buildings,
+      conveyorPoles: state.conveyorPoles,
+      conveyorBelts: state.conveyorBelts,
+      conveyorLifts: state.conveyorLifts,
+      pipeSupports: state.pipeSupports,
+      pipelines: state.pipelines,
+      pipeFloorConnections: state.pipeFloorConnections,
+      stickyNotes: state.stickyNotes,
+      railways: state.railways,
+      foundations: state.foundations,
+      wallSegments: state.wallSegments,
+      currentFloor: state.currentFloor,
+      selectedBuilding: state.selectedBuilding,
+      selectedPole: state.selectedPole,
+      selectedPipeSupport: state.selectedPipeSupport,
+      selectedStickyNote: state.selectedStickyNote,
+      selectedConveyorLift: state.selectedConveyorLift,
+      selectedPipeFloorConnection: state.selectedPipeFloorConnection,
+      selectedFoundation: state.selectedFoundation,
+      selectedWall: state.selectedWall,
+      selectedTool: state.selectedTool,
+      drawingState: state.drawingState,
+      showGrid: state.showGrid,
+      showFloorBelow: state.showFloorBelow,
+    }))
+  );
+};
+
+// Helper function to calculate visible bounds
+const calculateVisibleBounds = (
+  canvasWidth: number, 
+  canvasHeight: number, 
+  scale: number, 
+  position: { x: number; y: number }
+) => {
+  const padding = 200;
+  const left = (-position.x - padding) / scale / PIXELS_PER_METER;
+  const right = (-position.x + canvasWidth + padding) / scale / PIXELS_PER_METER;
+  const top = (-position.y - padding) / scale / PIXELS_PER_METER;
+  const bottom = (-position.y + canvasHeight + padding) / scale / PIXELS_PER_METER;
+  
+  return { left, right, top, bottom };
+};
+
+// Helper function to check if a building is visible
+const isBuildingVisible = (building: Building, buildingDef: any, bounds: any): boolean => {
+  const left = building.x;
+  const right = building.x + buildingDef.width;
+  const top = building.y;
+  const bottom = building.y + buildingDef.height;
+  
+  return !(right < bounds.left || left > bounds.right || bottom < bounds.top || top > bounds.bottom);
+};
+
+// Helper function to check if a point is visible
+const isPointVisible = (x: number, y: number, bounds: any, padding = 2): boolean => {
+  return x >= bounds.left - padding && 
+         x <= bounds.right + padding && 
+         y >= bounds.top - padding && 
+         y <= bounds.bottom + padding;
+};
+
+// Helper functions for constraints
+const constrainPoint = (reference: { x: number; y: number }, current: { x: number; y: number }, isShiftPressed: boolean, isCtrlPressed: boolean) => {
+  if (!isShiftPressed && !isCtrlPressed) return current;
+  
+  const dx = Math.abs(current.x - reference.x);
+  const dy = Math.abs(current.y - reference.y);
+  
+  if (isShiftPressed && !isCtrlPressed) {
+    if (dx > dy) {
+      return { x: current.x, y: reference.y };
+    } else {
+      return { x: reference.x, y: current.y };
+    }
+  } else if (isCtrlPressed && !isShiftPressed) {
+    const angle = Math.atan2(current.y - reference.y, current.x - reference.x);
+    const snapAngle = Math.round(angle / (Math.PI / 4)) * (Math.PI / 4);
+    const distance = Math.sqrt(dx * dx + dy * dy);
+    
+    return {
+      x: reference.x + Math.cos(snapAngle) * distance,
+      y: reference.y + Math.sin(snapAngle) * distance
+    };
+  } else if (isShiftPressed && isCtrlPressed) {
+    const gridSize = 8;
+    const angle = Math.atan2(current.y - reference.y, current.x - reference.x);
+    
+    return {
+      x: reference.x + Math.cos(angle) * gridSize,
+      y: reference.y + Math.sin(angle) * gridSize
+    };
+  }
+  
+  return current;
+};
+
+export const FactoryCanvas: React.FC = () => {
+  const stageRef = useRef<any>(null);
+  const [scale, setScale] = useState(1);
+  const [position, setPosition] = useState({ x: 0, y: 0 });
+  const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
+  const [canvasSize, setCanvasSize] = useState({ width: window.innerWidth, height: CANVAS_HEIGHT });
+  const [dragOver, setDragOver] = useState(false);
+  const [isMobile, setIsMobile] = useState(isTouchDevice());
+  const [lastTouchTime, setLastTouchTime] = useState(0);
+  const [lastTouchPos, setLastTouchPos] = useState({ x: 0, y: 0 });
+  const [touchStartDistance, setTouchStartDistance] = useState(0);
+  const [touchStartScale, setTouchStartScale] = useState(1);
+  const [isDraggingCanvas, setIsDraggingCanvas] = useState(false);
+  
+  // Performance mode integration
+  const { config } = usePerformanceMode();
+  const [renderQuality, setRenderQuality] = useState(1);
+  
+  // Touch interaction state management
+  const [touchStartTime, setTouchStartTime] = useState(0);
+  const [touchStartPos, setTouchStartPos] = useState({ x: 0, y: 0 });
+  const [isDragging, setIsDragging] = useState(false);
+  const [hasMoved, setHasMoved] = useState(false);
+  const [showRailwayDebug, setShowRailwayDebug] = useState(false);
+  
+  // Touch thresholds for better mobile UX
+  const TOUCH_MOVE_THRESHOLD = 10; // 10px movement threshold
+  const TOUCH_DRAG_TIME_THRESHOLD = 150; // 150ms before considering drag
+  
+  // Smooth zoom implementation
+  const smoothZoom = useMemo(() => createSmoothZoom(), []);
+  
+  // Update both scale and position simultaneously to prevent double renders
+  const updateZoom = useCallback((newScale: number, newPosition: { x: number; y: number }) => {
+    setScale(newScale);
+    setPosition(newPosition);
+    
+    // Also update the Konva Stage transform to ensure synchronization
+    const stage = stageRef.current;
+    if (stage) {
+      stage.scaleX(newScale);
+      stage.scaleY(newScale);
+      stage.x(newPosition.x);
+      stage.y(newPosition.y);
+      stage.batchDraw();
+    }
+  }, []);
+  
+  const {
+    buildings,
+    conveyorPoles,
+    conveyorBelts,
+    conveyorLifts,
+    pipeSupports,
+    pipelines,
+    pipeFloorConnections,
+    stickyNotes,
+    railways,
+    foundations,
+    wallSegments,
+    currentFloor,
+    selectedBuilding,
+    selectedPole,
+    selectedPipeSupport,
+    selectedStickyNote,
+    selectedConveyorLift,
+    selectedPipeFloorConnection,
+    selectedFoundation,
+    selectedWall,
+    selectedTool,
+    drawingState,
+    showGrid,
+    showFloorBelow
+  } = useOptimizedStore();
+  
+  // Store functions - memoized
+  // Consolidate action subscriptions
+  const storeActions = useLayoutStore(
+    useShallow(state => ({
+      updateBuilding: state.updateBuilding,
+      updateStickyNote: state.updateStickyNote,
+      deleteBuilding: state.deleteBuilding,
+      deletePole: state.deletePole,
+      deletePipeSupport: state.deletePipeSupport,
+      deleteStickyNote: state.deleteStickyNote,
+      setSelectedBuilding: state.setSelectedBuilding,
+      setSelectedPole: state.setSelectedPole,
+      setSelectedPipeSupport: state.setSelectedPipeSupport,
+      setSelectedStickyNote: state.setSelectedStickyNote,
+      setSelectedRailwaySegment: state.setSelectedRailwaySegment,
+      setSelectedRailwayNode: state.setSelectedRailwayNode,
+      rotateBuilding: state.rotateBuilding,
+      addPoleToPath: state.addPoleToPath,
+      finishConveyorDrawing: state.finishConveyorDrawing,
+      cancelDrawing: state.cancelDrawing,
+      addPipeSupport: state.addPipeSupport,
+      finishPipeDrawing: state.finishPipeDrawing,
+      cancelPipeDrawing: state.cancelPipeDrawing,
+      reverseBeltDirection: state.reverseBeltDirection,
+      addBuilding: state.addBuilding,
+      startRailwayDrawing: state.startRailwayDrawing,
+      addRailwayPoint: state.addRailwayPoint,
+      finishRailwayDrawing: state.finishRailwayDrawing,
+      cancelRailwayDrawing: state.cancelRailwayDrawing,
+      detectNearbyBuildingForRailwayConnection: state.detectNearbyBuildingForRailwayConnection,
+      startConveyorLiftDrawing: state.startConveyorLiftDrawing,
+      startPipeFloorConnectionDrawing: state.startPipeFloorConnectionDrawing,
+      setSelectedConveyorLift: state.setSelectedConveyorLift,
+      setSelectedPipeFloorConnection: state.setSelectedPipeFloorConnection,
+      deleteConveyorLift: state.deleteConveyorLift,
+      deletePipeFloorConnection: state.deletePipeFloorConnection,
+      startFoundationDrawing: state.startFoundationDrawing,
+      finishFoundationDrawing: state.finishFoundationDrawing,
+      startWallDrawing: state.startWallDrawing,
+      addWallPoint: state.addWallPoint,
+      finishWallDrawing: state.finishWallDrawing,
+      cancelWallDrawing: state.cancelWallDrawing,
+      cancelFoundationDrawing: state.cancelFoundationDrawing,
+      setSelectedFoundation: state.setSelectedFoundation,
+      setSelectedWall: state.setSelectedWall,
+      updateFoundation: state.updateFoundation,
+      updateWallSegment: state.updateWallSegment,
+      deleteFoundation: state.deleteFoundation,
+      deleteWallSegment: state.deleteWallSegment,
+    }))
+  );
+
+  const {
+    updateBuilding,
+    updateStickyNote,
+    deleteBuilding,
+    deletePole,
+    deletePipeSupport,
+    deleteStickyNote,
+    setSelectedBuilding,
+    setSelectedPole,
+    setSelectedPipeSupport,
+    setSelectedStickyNote,
+    setSelectedRailwaySegment,
+    setSelectedRailwayNode,
+    rotateBuilding,
+    addPoleToPath,
+    finishConveyorDrawing,
+    cancelDrawing,
+    addPipeSupport,
+    finishPipeDrawing,
+    cancelPipeDrawing,
+    reverseBeltDirection,
+    addBuilding,
+    startRailwayDrawing,
+    addRailwayPoint,
+    finishRailwayDrawing,
+    cancelRailwayDrawing,
+    detectNearbyBuildingForRailwayConnection,
+    startConveyorLiftDrawing,
+    setSelectedConveyorLift,
+    setSelectedPipeFloorConnection,
+    deleteConveyorLift,
+    deletePipeFloorConnection,
+    startFoundationDrawing,
+    finishFoundationDrawing,
+    startWallDrawing,
+    addWallPoint,
+    finishWallDrawing,
+    cancelWallDrawing,
+    cancelFoundationDrawing,
+    setSelectedFoundation,
+    setSelectedWall,
+    updateFoundation,
+    updateWallSegment,
+    deleteFoundation,
+    deleteWallSegment,
+  } = storeActions;
+  
+  // FIXED: Determine if stage should be draggable - moved earlier in the component
+  const isStageDraggable = useMemo(() => {
+    const allowedTools = ['move', 'select'];
+    const isValidTool = allowedTools.includes(selectedTool);
+    const notDrawing = !drawingState.isDrawing && !drawingState.drawingPipe && !drawingState.drawingRailway && !drawingState.drawingConveyorLift && !drawingState.drawingPipeFloorConnection;
+    return isValidTool && notDrawing;
+  }, [selectedTool, drawingState]);
+
+  // Detect mobile device changes
+  useEffect(() => {
+    const checkMobile = () => {
+      setIsMobile(isTouchDevice() || window.innerWidth < 768);
+    };
+    
+    window.addEventListener('resize', checkMobile);
+    checkMobile();
+    
+    return () => window.removeEventListener('resize', checkMobile);
+  }, []);
+  
+  // Adjust render quality based on performance mode
+  useEffect(() => {
+    if (config.shadowQuality === 'low') {
+      setRenderQuality(0.75); // Render at 75% resolution
+    } else if (config.shadowQuality === 'medium') {
+      setRenderQuality(0.9); // Render at 90% resolution
+    } else {
+      setRenderQuality(1); // Full resolution
+    }
+  }, [config.shadowQuality]);
+  
+  // Responsive canvas sizing
+  useEffect(() => {
+    const updateCanvasSize = () => {
+      const container = stageRef.current?.container()?.parentElement;
+      if (container) {
+        const rect = container.getBoundingClientRect();
+        setCanvasSize({
+          width: rect.width,
+          height: rect.height
+        });
+      }
+    };
+    
+    updateCanvasSize();
+    window.addEventListener('resize', updateCanvasSize);
+    return () => window.removeEventListener('resize', updateCanvasSize);
+  }, []);
+  
+  // Calculate visible bounds using current stage transform for better accuracy
+  const visibleBounds = useMemo(() => {
+    const stage = stageRef.current;
+    if (stage) {
+      // Use actual stage transform values for more accurate bounds calculation
+      const currentScale = stage.scaleX();
+      const currentPosition = { x: stage.x(), y: stage.y() };
+      return calculateVisibleBounds(canvasSize.width, canvasSize.height, currentScale, currentPosition);
+    }
+    // Fallback to React state
+    return calculateVisibleBounds(canvasSize.width, canvasSize.height, scale, position);
+  }, [canvasSize.width, canvasSize.height, scale, position]);
+  
+  // Memoized floor filtering with viewport culling
+  const { currentFloorBuildings, floorBelowBuildings } = useMemo(() => {
+    const allBuildings = Object.values(buildings);
+    
+    const currentFloorBuildings = allBuildings.filter(b => {
+      const buildingDef = BUILDING_TYPES[b.type];
+      if (!buildingDef) return false;
+      
+      const isOnFloor = b.floor === currentFloor || 
+        (b.z < (currentFloor + 1) * FLOOR_HEIGHT && 
+         b.z + buildingDef.depth > currentFloor * FLOOR_HEIGHT);
+      
+      if (!isOnFloor) return false;
+      
+      return isBuildingVisible(b, buildingDef, visibleBounds);
+    });
+    
+    // Filter buildings from floor below for faded visibility
+    const floorBelowBuildings = showFloorBelow ? allBuildings.filter(b => {
+      const buildingDef = BUILDING_TYPES[b.type];
+      if (!buildingDef) return false;
+      
+      const isOnFloorBelow = b.floor === currentFloor - 1;
+      
+      if (!isOnFloorBelow) return false;
+      
+      return isBuildingVisible(b, buildingDef, visibleBounds);
+    }) : [];
+    
+    return { currentFloorBuildings, floorBelowBuildings };
+  }, [buildings, currentFloor, visibleBounds, showFloorBelow]);
+  
+  // Memoized floor filtering for poles and pipe supports with faded floor below support
+  const { currentFloorPoles, floorBelowPoles } = useMemo(() => {
+    const allPoles = Object.values(conveyorPoles);
+    
+    const currentFloorPoles = allPoles.filter(p => 
+      p.floor === currentFloor && isPointVisible(p.x, p.y, visibleBounds)
+    );
+    const floorBelowPoles = showFloorBelow ? 
+      allPoles.filter(p => p.floor === currentFloor - 1 && isPointVisible(p.x, p.y, visibleBounds)) : [];
+    
+    return { currentFloorPoles, floorBelowPoles };
+  }, [conveyorPoles, currentFloor, visibleBounds, showFloorBelow]);
+  
+  const { currentFloorPipeSupports, floorBelowPipeSupports } = useMemo(() => {
+    const allSupports = Object.values(pipeSupports);
+    
+    const currentFloorPipeSupports = allSupports.filter(s => 
+      s.floor === currentFloor && isPointVisible(s.x, s.y, visibleBounds)
+    );
+    const floorBelowPipeSupports = showFloorBelow ? 
+      allSupports.filter(s => s.floor === currentFloor - 1 && isPointVisible(s.x, s.y, visibleBounds)) : [];
+    
+    return { currentFloorPipeSupports, floorBelowPipeSupports };
+  }, [pipeSupports, currentFloor, visibleBounds, showFloorBelow]);
+  
+  // Memoized floor filtering for infrastructure with faded floor below support
+  const { currentFloorConveyors, floorBelowConveyors } = useMemo(() => {
+    const allConveyors = Object.values(conveyorBelts);
+    
+    const currentFloorConveyors = allConveyors.filter(belt => belt.floor === currentFloor);
+    const floorBelowConveyors = showFloorBelow ? 
+      allConveyors.filter(belt => belt.floor === currentFloor - 1) : [];
+    
+    return { currentFloorConveyors, floorBelowConveyors };
+  }, [conveyorBelts, currentFloor, showFloorBelow]);
+  
+  const { currentFloorPipelines, floorBelowPipelines } = useMemo(() => {
+    const allPipelines = Object.values(pipelines);
+    
+    const currentFloorPipelines = allPipelines.filter(pipeline => pipeline.floor === currentFloor);
+    const floorBelowPipelines = showFloorBelow ? 
+      allPipelines.filter(pipeline => pipeline.floor === currentFloor - 1) : [];
+    
+    return { currentFloorPipelines, floorBelowPipelines };
+  }, [pipelines, currentFloor, showFloorBelow]);
+  
+  const { currentFloorRailways, floorBelowRailways } = useMemo(() => {
+    const allRailways = Object.values(railways);
+    
+    const currentFloorRailways = allRailways.filter(railway => railway.floor === currentFloor);
+    const floorBelowRailways = showFloorBelow ? 
+      allRailways.filter(railway => railway.floor === currentFloor - 1) : [];
+    
+    return { currentFloorRailways, floorBelowRailways };
+  }, [railways, currentFloor, showFloorBelow]);
+
+  const { currentFloorFoundations, floorBelowFoundations } = useMemo(() => {
+    const allFoundations = Object.values(foundations);
+    
+    const currentFloorFoundations = allFoundations.filter(f => f.floor === currentFloor);
+    const floorBelowFoundations = showFloorBelow ? 
+      allFoundations.filter(f => f.floor === currentFloor - 1) : [];
+    
+    return { currentFloorFoundations, floorBelowFoundations };
+  }, [foundations, currentFloor, showFloorBelow]);
+
+  const { currentFloorWalls, floorBelowWalls } = useMemo(() => {
+    const allWalls = Object.values(wallSegments);
+    
+    const currentFloorWalls = allWalls.filter(w => w.floor === currentFloor);
+    const floorBelowWalls = showFloorBelow ? 
+      allWalls.filter(w => w.floor === currentFloor - 1) : [];
+    
+    return { currentFloorWalls, floorBelowWalls };
+  }, [wallSegments, currentFloor, showFloorBelow]);
+
+  // Enhanced drag and drop support - memoized callbacks
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(true);
+  }, []);
+
+  const handleBuildingDragEnd = useCallback((buildingId: string, e: any) => {
+  const building = buildings[buildingId];
+  if (!building) return;
+  
+  const buildingDef = BUILDING_TYPES[building.type];
+  
+  const x = Math.round((e.target.x() / PIXELS_PER_METER - buildingDef.width / 2) / GRID_SIZE) * GRID_SIZE;
+  const y = Math.round((e.target.y() / PIXELS_PER_METER - buildingDef.height / 2) / GRID_SIZE) * GRID_SIZE;
+  updateBuilding(buildingId, { x, y });
+}, [buildings, updateBuilding]);
+
+const handleStickyNoteDragEnd = useCallback((noteId: string, e: any) => {
+  const x = Math.round(e.target.x() / PIXELS_PER_METER / GRID_SIZE) * GRID_SIZE;
+  const y = Math.round(e.target.y() / PIXELS_PER_METER / GRID_SIZE) * GRID_SIZE;
+  updateStickyNote(noteId, { x, y });
+}, [updateStickyNote]);
+
+const handleFoundationDragEnd = useCallback((foundationId: string, e: any) => {
+  // Snap to 8m grid
+  const x = Math.round(e.target.x() / PIXELS_PER_METER / 8) * 8;
+  const y = Math.round(e.target.y() / PIXELS_PER_METER / 8) * 8;
+  updateFoundation(foundationId, { x, y });
+}, [updateFoundation]);
+
+const handleWallDragEnd = useCallback((wallId: string, e: any) => {
+  // For walls, we need to update both start and end positions
+  const wall = wallSegments[wallId];
+  if (!wall) return;
+  
+  const dx = e.target.x() / PIXELS_PER_METER - wall.x;
+  const dy = e.target.y() / PIXELS_PER_METER - wall.y;
+  
+  updateWallSegment(wallId, { 
+    x: wall.x + dx, 
+    y: wall.y + dy,
+    endX: wall.endX + dx,
+    endY: wall.endY + dy
+  });
+}, [wallSegments, updateWallSegment]);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+  }, []);
+
+  // FIXED: Drag and drop coordinate conversion with renderQuality
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+    
+    const buildingType = e.dataTransfer.getData('application/building-type');
+    if (!buildingType || !BUILDING_TYPES[buildingType]) return;
+    
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    
+    // FIXED: Account for renderQuality factor in coordinate conversion
+    const adjustedX = x * renderQuality;
+    const adjustedY = y * renderQuality;
+    
+    const worldX = Math.round(((adjustedX - position.x) / scale / PIXELS_PER_METER) / GRID_SIZE) * GRID_SIZE;
+    const worldY = Math.round(((adjustedY - position.y) / scale / PIXELS_PER_METER) / GRID_SIZE) * GRID_SIZE;
+    
+    const buildingDef = BUILDING_TYPES[buildingType];
+    const building: Building = {
+      id: `building-${Date.now()}`,
+      type: buildingType,
+      x: worldX,
+      y: worldY,
+      z: currentFloor * FLOOR_HEIGHT,
+      floor: currentFloor,
+      rotation: 0,
+      connectionPoints: buildingDef.connectionPoints,
+      railwayPoints: buildingDef.railwayPoints
+    };
+    
+    addBuilding(building);
+    
+    // Only select if not in drawing mode
+    if (!drawingState.isDrawing && !drawingState.drawingPipe && !drawingState.drawingRailway) {
+      setSelectedBuilding(building.id);
+    }
+  }, [position, scale, currentFloor, addBuilding, setSelectedBuilding, drawingState, renderQuality]);
+
+  // Touch distance calculation for pinch zoom
+  const getTouchDistance = useCallback((touches: TouchList) => {
+    if (touches.length < 2) return 0;
+    const touch1 = touches[0];
+    const touch2 = touches[1];
+    return Math.sqrt(
+      Math.pow(touch2.clientX - touch1.clientX, 2) + 
+      Math.pow(touch2.clientY - touch1.clientY, 2)
+    );
+  }, []);
+
+  // Improved touch handling for mobile
+  const handleTouchStart = useCallback((e: any) => {
+    const touches = e.evt.touches;
+    const now = Date.now();
+    
+    if (touches.length === 2) {
+      // Pinch zoom start
+      const distance = getTouchDistance(touches);
+      setTouchStartDistance(distance);
+      setTouchStartScale(scale);
+      setIsDragging(false);
+      setHasMoved(false);
+      e.evt.preventDefault();
+    } else if (touches.length === 1) {
+      const touch = touches[0];
+      
+      // Record touch start state
+      setTouchStartTime(now);
+      setTouchStartPos({ x: touch.clientX, y: touch.clientY });
+      setIsDragging(false);
+      setHasMoved(false);
+      
+      // Double-tap detection for zoom
+      if (now - lastTouchTime < 300 && 
+          Math.abs(touch.clientX - lastTouchPos.x) < 50 && 
+          Math.abs(touch.clientY - lastTouchPos.y) < 50) {
+        const newScale = scale > 1 ? MIN_ZOOM : Math.min(scale * 2, MAX_ZOOM);
+        setScale(newScale);
+        e.evt.preventDefault();
+      }
+      
+      setLastTouchTime(now);
+      setLastTouchPos({ x: touch.clientX, y: touch.clientY });
+    }
+  }, [scale, lastTouchTime, lastTouchPos, getTouchDistance]);
+
+  const handleTouchMove = useCallback((e: any) => {
+    const touches = e.evt.touches;
+    const now = Date.now();
+    
+    if (touches.length === 2) {
+      // Pinch zoom
+      const distance = getTouchDistance(touches);
+      if (touchStartDistance > 0) {
+        const scaleChange = distance / touchStartDistance;
+        const newScale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, touchStartScale * scaleChange));
+        setScale(newScale);
+      }
+      e.evt.preventDefault();
+    } else if (touches.length === 1) {
+      const touch = touches[0];
+      const moveDistance = Math.sqrt(
+        Math.pow(touch.clientX - touchStartPos.x, 2) + 
+        Math.pow(touch.clientY - touchStartPos.y, 2)
+      );
+      
+      // Better movement detection - both time AND distance thresholds
+      if (!hasMoved && (
+        moveDistance > TOUCH_MOVE_THRESHOLD || 
+        (now - touchStartTime > TOUCH_DRAG_TIME_THRESHOLD && moveDistance > 5)
+      )) {
+        setHasMoved(true);
+        // Only set dragging if we're in move mode or dragging canvas
+        if (selectedTool === 'move' || (!drawingState.isDrawing && !drawingState.drawingPipe && !drawingState.drawingRailway)) {
+          setIsDragging(true);
+        }
+      }
+    }
+  }, [touchStartDistance, touchStartScale, getTouchDistance, touchStartPos, touchStartTime, hasMoved, selectedTool, drawingState]);
+
+  const handleTouchEnd = useCallback(() => {
+    // Reset states with delay to allow selection events to process
+    setTimeout(() => {
+      setIsDragging(false);
+      setHasMoved(false);
+    }, 50);
+  }, []);
+  
+  // Handle zoom with improved performance and smoothness
+  const handleWheel = useCallback((e: any) => {
+    e.evt.preventDefault();
+    
+    // Quick building rotation check first (lightweight)
+    if (selectedBuilding) {
+      const delta = e.evt.deltaY > 0 ? 1 : -1;
+      const rotations: Array<0 | 90 | 180 | 270> = [0, 90, 180, 270];
+      const building = buildings[selectedBuilding];
+      if (building) {
+        const currentIndex = rotations.indexOf(building.rotation);
+        const newIndex = (currentIndex + delta + 4) % 4;
+        updateBuilding(selectedBuilding, { rotation: rotations[newIndex] });
+      }
+      return;
+    }
+    
+    // Optimized zoom calculation
+    const scaleBy = 1.1;
+    const stage = stageRef.current;
+    if (!stage) return;
+    
+    const oldScale = scale;
+    const pointer = stage.getPointerPosition();
+    if (!pointer) return;
+    
+    // Calculate new scale with clamping
+    const direction = e.evt.deltaY > 0 ? -1 : 1;
+    const newScale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, oldScale * Math.pow(scaleBy, direction)));
+    
+    // Only update if scale actually changed
+    if (Math.abs(newScale - oldScale) < 0.001) return;
+    
+    // FIXED: Improved zoom calculation to properly center on mouse cursor
+    // Get the mouse position relative to the stage (not the canvas position)
+    const mousePointTo = {
+      x: (pointer.x - position.x) / oldScale,
+      y: (pointer.y - position.y) / oldScale,
+    };
+    
+    // Calculate the new position so the point under the mouse stays in the same place
+    const newPosition = {
+      x: pointer.x - mousePointTo.x * newScale,
+      y: pointer.y - mousePointTo.y * newScale,
+    };
+    
+    // Use smooth zoom for better performance with completion callback
+    smoothZoom(newScale, newPosition, updateZoom, () => {
+      // Force a re-render of visible bounds after zoom completes
+      // This ensures the grid updates properly after async zoom operations
+      const stage = stageRef.current;
+      if (stage) {
+        stage.batchDraw();
+      }
+    });
+  }, [selectedBuilding, buildings, updateBuilding, scale, position, smoothZoom, updateZoom]);
+  
+const handleCanvasDragStart = (e: any) => {
+  if (!isStageDraggable || e.target !== stageRef.current || selectedTool !== 'select') {
+    e.evt.preventDefault();
+    return;
+  }
+
+  setIsDraggingCanvas(true);
+};
+
+const handleCanvasDragEnd = (e: any) => {
+  if (e.target !== stageRef.current) return;
+
+  // Snap stage position to prevent drifting
+  const stage = stageRef.current;
+  const pos = stage.position();
+  const snappedPos = {
+    x: Math.round(pos.x / GRID_SIZE) * GRID_SIZE,
+    y: Math.round(pos.y / GRID_SIZE) * GRID_SIZE,
+  };
+  
+  stage.position(snappedPos);
+  stage.batchDraw();
+  
+  // Update React state to match the Stage transform
+  setPosition(snappedPos);
+  setIsDraggingCanvas(false);
+};
+
+  // Enhanced building selection with mobile considerations - fixed parameter type
+  const handleBuildingSelect = useCallback((buildingId: string) => {
+    // On mobile, check if we were actually actually dragging/moving
+    if (isMobile && hasMoved) {
+      return;
+    }
+    
+    if (selectedTool === 'delete') {
+      deleteBuilding(buildingId);
+    } else if (selectedTool === 'rotate') {
+      rotateBuilding(buildingId);
+      // Add haptic feedback on mobile
+      if (isMobile && 'vibrate' in navigator) {
+        navigator.vibrate(50);
+      }
+    } else {
+      // Only select if not in drawing mode to avoid workflow interruption
+      if (!drawingState.isDrawing && !drawingState.drawingPipe && !drawingState.drawingRailway) {
+        setSelectedBuilding(buildingId);
+        // Clear other selections to prevent multiple selections
+        setSelectedRailwaySegment(null);
+        setSelectedRailwayNode(null);
+        setSelectedPole(null);
+        setSelectedPipeSupport(null);
+        setSelectedStickyNote(null);
+        setSelectedConveyorLift(null);
+        setSelectedPipeFloorConnection(null);
+        setSelectedFoundation(null);
+        setSelectedWall(null);
+        // Add haptic feedback on mobile
+        if (isMobile && 'vibrate' in navigator) {
+          navigator.vibrate(30);
+        }
+      }
+    }
+  }, [selectedTool, deleteBuilding, rotateBuilding, setSelectedBuilding, setSelectedRailwaySegment, 
+      setSelectedRailwayNode, setSelectedPole, setSelectedPipeSupport, setSelectedStickyNote,
+      setSelectedConveyorLift, setSelectedPipeFloorConnection, setSelectedFoundation, setSelectedWall,
+      drawingState, isMobile, hasMoved]);
+  
+  // FIXED: Improved pole selection handling with proper mobile support - fixed parameter type
+  const handlePoleSelect = useCallback((poleId: string) => {
+    
+    // On mobile, only ignore if we actually moved significantly
+    if (isMobile && hasMoved) {
+      return;
+    }
+    
+    // Priority 1: Drawing mode - handle conveyor connections
+    if (drawingState.isDrawing && (selectedTool === 'conveyor' || selectedTool === 'select')) {
+      finishConveyorDrawing(undefined, undefined, poleId);
+      // Add haptic feedback for successful connection
+      if (isMobile && 'vibrate' in navigator) {
+        navigator.vibrate([50, 50, 50]);
+      }
+      return;
+    }
+    
+    // Priority 2: Tool-based actions
+    if (selectedTool === 'delete') {
+      deletePole(poleId);
+      // Add haptic feedback for deletion
+      if (isMobile && 'vibrate' in navigator) {
+        navigator.vibrate(100);
+      }
+    } else {
+      // Only select if not in drawing mode to avoid workflow interruption
+      if (!drawingState.isDrawing && !drawingState.drawingPipe && !drawingState.drawingRailway) {
+        setSelectedPole(poleId);
+        // Add haptic feedback for selection
+        if (isMobile && 'vibrate' in navigator) {
+          navigator.vibrate(30);
+        }
+      }
+    }
+  }, [selectedTool, drawingState.isDrawing, finishConveyorDrawing, deletePole, setSelectedPole, isMobile, hasMoved, touchStartTime]);
+  
+  // FIXED: Enhanced pipe support selection handling - fixed parameter type
+  const handlePipeSupportSelect = useCallback((supportId: string) => {
+    
+    // On mobile, only ignore if we actually moved significantly
+    if (isMobile && hasMoved) {
+      return;
+    }
+    
+    // Priority 1: Drawing mode - handle pipe connections
+    if (drawingState.drawingPipe && (selectedTool === 'pipe' || selectedTool === 'select')) {
+      finishPipeDrawing(undefined, undefined, supportId);
+      // Add haptic feedback for successful connection
+      if (isMobile && 'vibrate' in navigator) {
+        navigator.vibrate([50, 50, 50]);
+      }
+      return;
+    }
+    
+    // Priority 2: Tool-based actions
+    if (selectedTool === 'delete') {
+      deletePipeSupport(supportId);
+      // Add haptic feedback for deletion
+      if (isMobile && 'vibrate' in navigator) {
+        navigator.vibrate(100);
+      }
+    } else {
+      // Only select if not in drawing mode to avoid workflow interruption
+      if (!drawingState.isDrawing && !drawingState.drawingPipe && !drawingState.drawingRailway) {
+        setSelectedPipeSupport(supportId);
+        // Add haptic feedback for selection
+        if (isMobile && 'vibrate' in navigator) {
+          navigator.vibrate(30);
+        }
+      }
+    }
+  }, [selectedTool, drawingState.drawingPipe, finishPipeDrawing, deletePipeSupport, setSelectedPipeSupport, isMobile, hasMoved]);
+  
+  // FIXED: Handle sticky note selection - memoized - fixed parameter type
+  const handleStickyNoteSelect = useCallback((noteId: string) => {
+    // On mobile, check if we were actually moving
+    if (isMobile && hasMoved) {
+      return;
+    }
+    
+    if (selectedTool === 'delete') {
+      deleteStickyNote(noteId);
+      // Add haptic feedback for deletion
+      if (isMobile && 'vibrate' in navigator) {
+        navigator.vibrate(100);
+      }
+    } else {
+      // Only select if not in drawing mode
+      if (!drawingState.isDrawing && !drawingState.drawingPipe && !drawingState.drawingRailway) {
+        setSelectedStickyNote(noteId);
+        // Add haptic feedback for selection
+        if (isMobile && 'vibrate' in navigator) {
+          navigator.vibrate(30);
+        }
+      }
+    }
+  }, [selectedTool, deleteStickyNote, setSelectedStickyNote, drawingState, isMobile, hasMoved]);
+
+  // Handle foundation selection
+  const handleFoundationSelect = useCallback((foundationId: string) => {
+    if (isMobile && hasMoved) {
+      return;
+    }
+    
+    if (selectedTool === 'move' || selectedTool === 'select' || selectedTool === 'delete') {
+      setSelectedFoundation(foundationId);
+    }
+  }, [selectedTool, setSelectedFoundation, isMobile, hasMoved]);
+
+  // Handle wall selection
+  const handleWallSelect = useCallback((wallId: string) => {
+    if (isMobile && hasMoved) {
+      return;
+    }
+    
+    if (selectedTool === 'move' || selectedTool === 'select' || selectedTool === 'delete') {
+      setSelectedWall(wallId);
+    }
+  }, [selectedTool, setSelectedWall, isMobile, hasMoved]);
+  
+  // Handle belt click for direction reversal - memoized
+  const handleBeltClick = useCallback((beltId: string) => {
+    reverseBeltDirection(beltId);
+    // Add haptic feedback for belt direction change
+    if (isMobile && 'vibrate' in navigator) {
+      navigator.vibrate(50);
+    }
+  }, [reverseBeltDirection, isMobile]);
+  
+  // Enhanced stage click with better mobile touch handling
+  const handleStageClick = useCallback((e: any) => {
+    // Check what was actually clicked
+    const target = e.target;
+    const targetName = (typeof target.name === 'function' ? target.name() : target.name) || target.className || '';
+    
+    
+    // Only process clicks on the actual stage background
+    if (target !== target.getStage()) {
+      return;
+    }
+    
+    // On mobile, ignore if we were actually moving (dragging the canvas)
+    if (isMobile && hasMoved) {
+      return;
+    }
+    
+    const isShiftPressed = e.evt?.shiftKey || false;
+    const isCtrlPressed = e.evt?.ctrlKey || e.evt?.metaKey || false;
+    
+    // Railway drawing mode
+if (selectedTool === 'railway') {
+  const stage = stageRef.current;
+  const point = stage.getPointerPosition();
+  if (!point) return;
+
+  const x = (point.x - position.x) / scale;
+  const y = (point.y - position.y) / scale;
+
+  const worldX = Math.round(x / PIXELS_PER_METER * 2) / 2;
+  const worldY = Math.round(y / PIXELS_PER_METER * 2) / 2;
+  const worldZ = currentFloor * FLOOR_HEIGHT;
+
+  const clickPoint: Point3D = { x: worldX, y: worldY, z: worldZ };
+
+  if (!drawingState.drawingRailway) {
+    // Check if we're clicking near a building for direct connection (start new drawing)
+    const nearbyBuilding = detectNearbyBuildingForRailwayConnection(
+      clickPoint,
+      '', // No building to exclude for starting
+      1.5 // 1.5 meter threshold for initial building detection
+    );
+    
+    if (nearbyBuilding) {
+      // Start drawing from this building
+      startRailwayDrawing(nearbyBuilding.buildingId, nearbyBuilding.railPointId);
+    } else {
+      // Create and add the starting node first for free drawing
+      const newStartNode = createNodeAtPoint(clickPoint, currentFloor);
+      useLayoutStore.getState().addRailwayNode(newStartNode);
+      startRailwayDrawing(undefined, undefined, newStartNode.id);
+    }
+  } else {
+    // Check if we're finishing on a building for direct connection
+    const nearbyBuilding = drawingState.railwayStartStation ? 
+      detectNearbyBuildingForRailwayConnection(
+        clickPoint,
+        drawingState.railwayStartStation, // Exclude the starting building
+        1.5 // 1.5 meter threshold
+      ) : null;
+    
+    if (nearbyBuilding) {
+      // Finish drawing to this building
+      finishRailwayDrawing(nearbyBuilding.buildingId, nearbyBuilding.railPointId);
+    } else {
+      addRailwayPoint(clickPoint);
+    }
+  }
+
+  // Add haptic feedback for placing railway points
+  if (isMobile && 'vibrate' in navigator) {
+    navigator.vibrate(40);
+  }
+  return;
+}
+    
+    // During pipe drawing mode, add supports on empty space clicks
+    if (drawingState.drawingPipe) {
+      const stage = stageRef.current;
+      const point = stage.getPointerPosition();
+      const x = (point.x - position.x) / scale;
+      const y = (point.y - position.y) / scale;
+      
+      const worldX = Math.round(x / PIXELS_PER_METER * 2) / 2;
+      const worldY = Math.round(y / PIXELS_PER_METER * 2) / 2;
+      
+      const newSupport: PipeSupport = {
+        id: `support-${Date.now()}`,
+        x: worldX,
+        y: worldY,
+        z: currentFloor * FLOOR_HEIGHT,
+        floor: currentFloor
+      };
+      
+      addPipeSupport(newSupport);
+      
+      // Add haptic feedback for placing pipe supports
+      if (isMobile && 'vibrate' in navigator) {
+        navigator.vibrate(40);
+      }
+      return;
+    }
+    
+    // During conveyor drawing mode, add poles on empty space clicks
+    if (drawingState.isDrawing) {
+      const stage = stageRef.current;
+      const point = stage.getPointerPosition();
+      const x = (point.x - position.x) / scale;
+      const y = (point.y - position.y) / scale;
+      
+      let worldX = x / PIXELS_PER_METER;
+      let worldY = y / PIXELS_PER_METER;
+      
+      // Apply constraints if shift/ctrl is pressed
+      if ((isShiftPressed || isCtrlPressed) && drawingState.currentPath.length > 0) {
+        const lastPole = drawingState.currentPath[drawingState.currentPath.length - 1];
+        const constrainedPos = constrainPoint(
+          { x: lastPole.x, y: lastPole.y },
+          { x: worldX, y: worldY },
+          isShiftPressed,
+          isCtrlPressed
+        );
+        worldX = constrainedPos.x;
+        worldY = constrainedPos.y;
+      }
+      
+      // Snap to grid
+      worldX = Math.round(worldX * 2) / 2;
+      worldY = Math.round(worldY * 2) / 2;
+      
+      const newPole: ConveyorPole = {
+        id: `pole-${Date.now()}`,
+        x: worldX,
+        y: worldY,
+        z: currentFloor * FLOOR_HEIGHT,
+        floor: currentFloor
+      };
+      
+      addPoleToPath(newPole);
+      
+      // Add haptic feedback for placing conveyor poles
+      if (isMobile && 'vibrate' in navigator) {
+        navigator.vibrate(40);
+      }
+      return;
+    }
+    
+    // Normal tool behavior
+    if (selectedTool === 'pole') {
+      const stage = stageRef.current;
+      const point = stage.getPointerPosition();
+      const x = (point.x - position.x) / scale;
+      const y = (point.y - position.y) / scale;
+      
+      const worldX = Math.round(x / PIXELS_PER_METER * 2) / 2;
+      const worldY = Math.round(y / PIXELS_PER_METER * 2) / 2;
+      
+      const newPole: ConveyorPole = {
+        id: `pole-${Date.now()}`,
+        x: worldX,
+        y: worldY,
+        z: currentFloor * FLOOR_HEIGHT,
+        floor: currentFloor
+      };
+      
+      useLayoutStore.getState().addPole(newPole);
+      
+      // Add haptic feedback for placing individual poles
+      if (isMobile && 'vibrate' in navigator) {
+        navigator.vibrate(40);
+      }
+    } else if (selectedTool === 'pipe_support') {
+      const stage = stageRef.current;
+      const point = stage.getPointerPosition();
+      const x = (point.x - position.x) / scale;
+      const y = (point.y - position.y) / scale;
+      
+      const worldX = Math.round(x / PIXELS_PER_METER * 2) / 2;
+      const worldY = Math.round(y / PIXELS_PER_METER * 2) / 2;
+      
+      const newSupport: PipeSupport = {
+        id: `support-${Date.now()}`,
+        x: worldX,
+        y: worldY,
+        z: currentFloor * FLOOR_HEIGHT,
+        floor: currentFloor
+      };
+      
+      useLayoutStore.getState().addPipeSupport(newSupport);
+      
+      // Add haptic feedback for placing individual pipe supports
+      if (isMobile && 'vibrate' in navigator) {
+        navigator.vibrate(40);
+      }
+    } else if (selectedTool === 'conveyor_lift') {
+      const stage = stageRef.current;
+      const point = stage.getPointerPosition();
+      if (!point) return;
+
+      // Convert screen coordinates to world coordinates with grid snapping
+      const worldX = Math.round((point.x - position.x) / scale / PIXELS_PER_METER / GRID_SIZE) * GRID_SIZE;
+      const worldY = Math.round((point.y - position.y) / scale / PIXELS_PER_METER / GRID_SIZE) * GRID_SIZE;
+
+      // Create a default conveyor lift (Mk 1, up direction, 1 floor up)
+      const id = `lift-${Date.now()}`;
+      const startFloor = currentFloor;
+      const endFloor = currentFloor + 1;
+      const height = FLOOR_HEIGHT;
+      
+      const lift: ConveyorLift = {
+        id,
+        x: worldX,
+        y: worldY,
+        startFloor,
+        endFloor,
+        mark: 1,
+        direction: 'up',
+        height,
+        cost: CONVEYOR_LIFT_BASE_COSTS[1] * Math.ceil(height / 2),
+        connectionPoints: [
+          {
+            id: 'start-floor',
+            x: 0,
+            y: 1.5,
+            type: 'input',
+            side: 'back',
+            isFluid: false,
+          },
+          {
+            id: 'end-floor',
+            x: 0,
+            y: -1.5,
+            type: 'output',
+            side: 'front',
+            isFluid: false,
+          },
+        ],
+      };
+
+      useLayoutStore.getState().addConveyorLift(lift);
+      useLayoutStore.getState().setSelectedConveyorLift(lift.id);
+
+      // Add haptic feedback
+      if (isMobile && 'vibrate' in navigator) {
+        navigator.vibrate(50);
+      }
+    } else if (selectedTool === 'pipe_floor_connection') {
+      const stage = stageRef.current;
+      const point = stage.getPointerPosition();
+      if (!point) return;
+
+      // Convert screen coordinates to world coordinates with grid snapping
+      const worldX = Math.round((point.x - position.x) / scale / PIXELS_PER_METER / GRID_SIZE) * GRID_SIZE;
+      const worldY = Math.round((point.y - position.y) / scale / PIXELS_PER_METER / GRID_SIZE) * GRID_SIZE;
+
+      // Create a default pipe floor connection (Mk 1, up direction, fluid type, 1 floor up)
+      const id = `pipefloor-${Date.now()}`;
+      const startFloor = currentFloor;
+      const endFloor = currentFloor + 1;
+      const height = FLOOR_HEIGHT;
+      
+      const connection: PipeFloorConnection = {
+        id,
+        x: worldX,
+        y: worldY,
+        startFloor,
+        endFloor,
+        mark: 1,
+        direction: 'up',
+        height,
+        cost: PIPE_FLOOR_CONNECTION_BASE_COSTS[1] * Math.ceil(height / 2),
+        bottomConnectionPoint: {
+          id: `${id}_bottom`,
+          x: 0,
+          y: 1,
+          type: 'input',
+          isFluid: true,
+        },
+        topConnectionPoint: {
+          id: `${id}_top`,
+          x: 0,
+          y: -1,
+          type: 'output',
+          isFluid: true,
+        },
+      };
+
+      useLayoutStore.getState().addPipeFloorConnection(connection);
+      useLayoutStore.getState().setSelectedPipeFloorConnection(connection.id);
+
+      // Add haptic feedback
+      if (isMobile && 'vibrate' in navigator) {
+        navigator.vibrate(50);
+      }
+    } else if (selectedTool === 'foundation') {
+      const stage = stageRef.current;
+      const point = stage.getPointerPosition();
+      if (!point) return;
+
+      // Convert screen coordinates to world coordinates
+      const worldX = (point.x - position.x) / scale / PIXELS_PER_METER;
+      const worldY = (point.y - position.y) / scale / PIXELS_PER_METER;
+
+      // Snap to 8m grid
+      const snapX = Math.round(worldX / 8) * 8;
+      const snapY = Math.round(worldY / 8) * 8;
+
+      if (!drawingState.drawingFoundation) {
+        // Start foundation drawing
+        startFoundationDrawing({ x: snapX, y: snapY });
+      } else {
+        // Finish foundation drawing with default material
+        finishFoundationDrawing({ x: snapX, y: snapY }, 'default');
+      }
+
+      // Add haptic feedback
+      if (isMobile && 'vibrate' in navigator) {
+        navigator.vibrate(40);
+      }
+    } else if (selectedTool === 'wall') {
+      const stage = stageRef.current;
+      const point = stage.getPointerPosition();
+      if (!point) return;
+
+      // Convert screen coordinates to world coordinates
+      const worldX = (point.x - position.x) / scale / PIXELS_PER_METER;
+      const worldY = (point.y - position.y) / scale / PIXELS_PER_METER;
+
+      // FIXED: Implement improved smart wall snapping logic with better tolerance
+      let snapX = worldX;
+      let snapY = worldY;
+      let snappedToFoundation = false;
+      let closestDistance = Infinity;
+
+      // Find nearest foundation edge for snapping with improved tolerance
+      Object.values(foundations).forEach(foundation => {
+        if (foundation.floor !== currentFloor) return;
+
+        const edges = [
+          // Top edge
+          { x1: foundation.x, y1: foundation.y, x2: foundation.x + foundation.width, y2: foundation.y },
+          // Bottom edge  
+          { x1: foundation.x, y1: foundation.y + foundation.height, x2: foundation.x + foundation.width, y2: foundation.y + foundation.height },
+          // Left edge
+          { x1: foundation.x, y1: foundation.y, x2: foundation.x, y2: foundation.y + foundation.height },
+          // Right edge
+          { x1: foundation.x + foundation.width, y1: foundation.y, x2: foundation.x + foundation.width, y2: foundation.y + foundation.height },
+        ];
+
+        edges.forEach(edge => {
+          // Calculate distance from mouse to edge
+          const dx = edge.x2 - edge.x1;
+          const dy = edge.y2 - edge.y1;
+          const length = Math.sqrt(dx * dx + dy * dy);
+          
+          if (length === 0) return; // Skip zero-length edges
+          
+          const t = Math.max(0, Math.min(1, ((worldX - edge.x1) * dx + (worldY - edge.y1) * dy) / (dx * dx + dy * dy)));
+          const nearestX = edge.x1 + t * dx;
+          const nearestY = edge.y1 + t * dy;
+          const distance = Math.sqrt((worldX - nearestX) ** 2 + (worldY - nearestY) ** 2);
+
+          // FIXED: Increased snapping tolerance from 2m to 4m for more forgiving wall placement
+          if (distance < 4 && distance < closestDistance) {
+            snapX = nearestX;
+            snapY = nearestY;
+            snappedToFoundation = true;
+            closestDistance = distance;
+          }
+        });
+      });
+
+      // FIXED: If not snapped to foundation, fall back to 8m grid snapping for consistent placement
+      if (!snappedToFoundation) {
+        snapX = Math.round(snapX / 8) * 8;
+        snapY = Math.round(snapY / 8) * 8;
+      }
+
+      if (!drawingState.drawingWall) {
+        // Start wall drawing with default height
+        startWallDrawing({ x: snapX, y: snapY }, 4);
+      } else {
+        // Add wall point
+        addWallPoint({ x: snapX, y: snapY });
+      }
+
+      // Add haptic feedback
+      if (isMobile && 'vibrate' in navigator) {
+        navigator.vibrate(40);
+      }
+    } else {
+      // Clear selections when clicking on empty space (only if not drawing)
+      if (!drawingState.isDrawing && !drawingState.drawingPipe && !drawingState.drawingRailway && 
+          !drawingState.drawingConveyorLift && !drawingState.drawingPipeFloorConnection &&
+          !drawingState.drawingFoundation && !drawingState.drawingWall) {
+        setSelectedBuilding(null);
+        setSelectedPole(null);
+        setSelectedPipeSupport(null);
+        setSelectedStickyNote(null);
+        setSelectedConveyorLift(null);
+        setSelectedPipeFloorConnection(null);
+        setSelectedFoundation(null);
+        setSelectedWall(null);
+        setSelectedRailwaySegment(null);
+        setSelectedRailwayNode(null);
+      }
+    }
+  }, [drawingState, selectedTool, currentFloor, position, scale, addPoleToPath, addPipeSupport, 
+      addRailwayPoint, startRailwayDrawing, startConveyorLiftDrawing, setSelectedBuilding, setSelectedPole, 
+      setSelectedPipeSupport, setSelectedStickyNote, setSelectedRailwaySegment, setSelectedRailwayNode,
+      isMobile, hasMoved, touchStartTime]);
+  
+  // FIXED: Handle mouse move - using Konva's getPointerPosition() for consistent coordinates
+  const handleMouseMove = useCallback(() => {
+    const stage = stageRef.current;
+    const point = stage.getPointerPosition();
+    
+    // Convert from stage coordinates to world coordinates
+    const x = (point.x - position.x) / scale;
+    const y = (point.y - position.y) / scale;
+    
+    const worldX = x / PIXELS_PER_METER;
+    const worldY = y / PIXELS_PER_METER;
+    
+    setMousePos({ x: worldX, y: worldY });
+  }, [position, scale]);
+  
+  // Throttle mouse move based on performance mode - more aggressive throttling
+  const throttleDelay = config.shadowQuality === 'low' ? 50 : config.shadowQuality === 'medium' ? 32 : 16;
+  const throttledMouseMove = useMemo(() => 
+    throttle(handleMouseMove, throttleDelay),
+    [handleMouseMove, throttleDelay]
+  );
+  
+  // Throttle wheel events for better zoom performance
+  const throttledWheel = useMemo(() => 
+    throttle(handleWheel, 16), // ~60fps max
+    [handleWheel]
+  );
+  
+  // Enhanced escape key and shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (drawingState.drawingFoundation) {
+        if (e.key === 'Escape') {
+          cancelFoundationDrawing();
+        }
+      } else if (drawingState.drawingWall) {
+        if (e.key === 'Escape') {
+          cancelWallDrawing();
+        } else if (e.key === 'Enter' || e.key === 'f' || e.key === 'F') {
+          if (!drawingState.wallSegments || drawingState.wallSegments.length === 0) {
+            return;
+          }
+          finishWallDrawing('default'); // Using default material
+        }
+      } else if (drawingState.drawingRailway) {
+        if (e.key === 'Escape') {
+          cancelRailwayDrawing();
+        } else if (e.key === 'Enter' || e.key === 'f' || e.key === 'F') {
+          finishRailwayDrawing();
+        }
+      } else if (drawingState.drawingPipe) {
+        if (e.key === 'Escape') {
+          cancelPipeDrawing();
+        } else if (e.key === 'Enter' || e.key === 'f' || e.key === 'F') {
+          if (!drawingState.pipePath || drawingState.pipePath.length < 2) {
+            return;
+          }
+          finishPipeDrawing();
+        }
+      } else if (drawingState.isDrawing) {
+        if (e.key === 'Escape') {
+          cancelDrawing();
+        } else if (e.key === 'Enter' || e.key === 'f' || e.key === 'F') {
+          if (drawingState.currentPath.length < 2) {
+            return;
+          }
+          finishConveyorDrawing();
+        }
+      } else if ((e.key === 'r' || e.key === 'R')) {
+        const currentMode = useLayoutStore.getState().conveyorMode;
+        useLayoutStore.getState().setConveyorMode(
+          currentMode === 'default' ? 'straight' : 'default'
+        );
+      } else if (e.key === 'd' && e.ctrlKey && e.shiftKey) {
+        // Toggle railway debug overlay with Ctrl+Shift+D
+        e.preventDefault();
+        setShowRailwayDebug(prev => !prev);
+      }
+    };
+    
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [drawingState, cancelDrawing, finishConveyorDrawing, cancelRailwayDrawing, 
+      finishRailwayDrawing, cancelPipeDrawing, finishPipeDrawing, 
+      cancelFoundationDrawing, cancelWallDrawing, finishWallDrawing, showRailwayDebug]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (selectedBuilding) {
+          deleteBuilding(selectedBuilding);
+          setSelectedBuilding(null);
+        } else if (selectedPole) {
+          deletePole(selectedPole);
+          setSelectedPole(null);
+        } else if (selectedPipeSupport) {
+          deletePipeSupport(selectedPipeSupport);
+          setSelectedPipeSupport(null);
+        } else if (selectedStickyNote) {
+          deleteStickyNote(selectedStickyNote);
+          setSelectedStickyNote(null);
+        } else if (selectedConveyorLift) {
+          deleteConveyorLift(selectedConveyorLift);
+          setSelectedConveyorLift(null);
+        } else if (selectedPipeFloorConnection) {
+          deletePipeFloorConnection(selectedPipeFloorConnection);
+          setSelectedPipeFloorConnection(null);
+        } else if (selectedFoundation) {
+          deleteFoundation(selectedFoundation);
+          setSelectedFoundation(null);
+        } else if (selectedWall) {
+          deleteWallSegment(selectedWall);
+          setSelectedWall(null);
+        }
+      }
+    };
+    
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectedBuilding, selectedPole, selectedPipeSupport, selectedStickyNote, 
+      selectedConveyorLift, selectedPipeFloorConnection, selectedFoundation, selectedWall,
+      deleteBuilding, deletePole, deletePipeSupport, deleteStickyNote,
+      deleteConveyorLift, deletePipeFloorConnection, deleteFoundation, deleteWallSegment,
+      setSelectedBuilding, setSelectedPole, setSelectedPipeSupport, setSelectedStickyNote,
+      setSelectedConveyorLift, setSelectedPipeFloorConnection, setSelectedFoundation, setSelectedWall]);
+
+  // Helper function to determine building opacity
+  const getBuildingOpacity = useCallback((building: Building, isGhost: boolean) => {
+    if (isGhost) return 0.2;
+    
+    const buildingDef = BUILDING_TYPES[building.type];
+    if (!buildingDef) return 1;
+    
+    if (building.floor < currentFloor) {
+      const buildingTop = building.z + buildingDef.depth;
+      const currentFloorBottom = currentFloor * FLOOR_HEIGHT;
+      const visibleHeight = buildingTop - currentFloorBottom;
+      const opacity = Math.min(1, Math.max(0.3, visibleHeight / buildingDef.depth));
+      return opacity;
+    }
+    
+    return 1;
+  }, [currentFloor]);
+
+  // Check if drawing is active
+  const isDrawing = drawingState.isDrawing || drawingState.drawingPipe || drawingState.drawingRailway;
+  const panelClass = config.enableBackdropBlur ? 'glass-panel' : 'glass-panel-solid';
+  
+  return (
+    <div 
+      className={`w-full h-full relative overflow-hidden transition-all duration-300 ${
+        dragOver ? 'bg-blue-900/20' : 
+        isDraggingCanvas ? 'bg-slate-800/90 cursor-grabbing' : 
+        isStageDraggable ? 'cursor-grab' :
+        'bg-gradient-to-br from-slate-900/80 via-gray-900/80 to-slate-800/80'
+      }`}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+{/* Enhanced drag overlay */}
+      {dragOver && config.enableAnimations && (
+  <motion.div
+    initial={{ opacity: 0, scale: 0.9 }}
+    animate={{ opacity: 1, scale: 1 }}
+  >
+    <div className={`${panelClass} absolute inset-0 z-10 pointer-events-none flex items-center justify-center`}>
+      <div className={`${panelClass} px-8 py-4 text-center`}>
+        <div className="text-2xl font-bold gradient-text mb-2">Drop Building Here</div>
+        <div className="text-slate-400">Release to place at cursor position</div>
+      </div>
+    </div>
+  </motion.div>
+)}
+      
+      {/* Enhanced canvas background - only on higher performance */}
+      {config.shadowQuality !== 'low' && (
+        <div className="absolute inset-0">
+          <div 
+            className="absolute inset-0 opacity-5"
+            style={{
+              backgroundImage: `
+                linear-gradient(rgba(250, 149, 73, 0.1) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(250, 149, 73, 0.1) 1px, transparent 1px)
+              `,
+              backgroundSize: '50px 50px',
+              animation: config.enableAnimations ? 'hex-float 20s linear infinite' : 'none'
+            }}
+          ></div>
+          
+          {config.enableGlowEffects && (
+            <>
+              <div className="absolute top-0 left-1/4 w-96 h-96 bg-orange-500/5 rounded-full blur-3xl"></div>
+              <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-blue-500/5 rounded-full blur-3xl"></div>
+            </>
+          )}
+        </div>
+      )}
+      
+      {/* Overlay Toolbar */}
+      <OverlayToolbar />
+
+      {/* Mobile Drawing Controls */}
+      {isMobile && isDrawing && (
+        <MobileDrawingControls />
+      )}
+
+      <Stage
+        ref={stageRef}
+        width={canvasSize.width * renderQuality}
+        height={canvasSize.height * renderQuality}
+        scaleX={scale}
+        scaleY={scale}
+        x={position.x}
+        y={position.y}
+        draggable={isStageDraggable && selectedTool === 'select'}
+  onDragStart={handleCanvasDragStart}
+  onDragEnd={handleCanvasDragEnd}
+  dragBoundFunc={(pos) => {
+    const stage = stageRef.current;
+    const currentScale = stage?.scaleX() || 1;
+    const snappedPos = {
+      x: Math.round(pos.x / (GRID_SIZE * currentScale)) * (GRID_SIZE * currentScale),
+      y: Math.round(pos.y / (GRID_SIZE * currentScale)) * (GRID_SIZE * currentScale),
+    };
+    
+    // Update React state during drag to keep GridBackground in sync
+    requestAnimationFrame(() => {
+      setPosition(snappedPos);
+    });
+    
+    return snappedPos;
+  }}
+        onWheel={throttledWheel}
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
+        onClick={handleStageClick}
+        onTap={handleStageClick}
+        onContextMenu={(e) => {
+          e.evt.preventDefault(); // Prevent default context menu
+          // Handle right-click for wall drawing
+          if (drawingState.drawingWall && drawingState.wallSegments && drawingState.wallSegments.length > 0) {
+            finishWallDrawing('default');
+          }
+        }}
+        onMouseMove={throttledMouseMove}
+        style={{
+          width: canvasSize.width,
+          height: canvasSize.height,
+        }}
+      >
+        <Layer>
+          {showGrid && (
+            <GridBackground
+              width={canvasSize.width}
+              height={canvasSize.height}
+              scale={scale}
+              showGrid={true}
+              stageX={position.x}
+              stageY={position.y}
+              stageRef={stageRef}
+            />
+          )}
+
+          {/* Render foundations from floor below with faded opacity (non-interactive) */}
+          {floorBelowFoundations.map(foundation => (
+            <FoundationShape
+              key={`below-${foundation.id}`}
+              foundation={foundation}
+              isSelected={false}
+              opacity={0.3}
+              onSelect={() => {}} // Non-interactive for floor below
+              onDragEnd={() => {}} // Non-interactive for floor below
+            />
+          ))}
+          
+          {/* Render foundations */}
+          {currentFloorFoundations.map(foundation => (
+            <FoundationShape
+              key={foundation.id}
+              foundation={foundation}
+              isSelected={selectedFoundation === foundation.id}
+              opacity={1}
+              onSelect={() => handleFoundationSelect(foundation.id)}
+              onDragEnd={(e) => handleFoundationDragEnd(foundation.id, e)}
+            />
+          ))}
+
+          {/* Render buildings from floor below with faded opacity (non-interactive) */}
+          {floorBelowBuildings.map(building => (
+            <MemoizedBuildingShape
+              key={`below-${building.id}`}
+              building={building}
+              isSelected={false}
+              opacity={0.3}
+              onSelect={() => {}} // Non-interactive for floor below
+              onDragEnd={() => {}} // Non-interactive for floor below
+            />
+          ))}
+          
+          {/* Render buildings with proper opacity */}
+          {currentFloorBuildings.map(building => (
+            <MemoizedBuildingShape
+              key={building.id}
+              building={building}
+              isSelected={selectedBuilding === building.id}
+              opacity={getBuildingOpacity(building, false)}
+              onSelect={() => handleBuildingSelect(building.id)}
+              onDragEnd={(e) => handleBuildingDragEnd(building.id, e)}
+            />
+          ))}
+
+          {/* Render walls from floor below with faded opacity (non-interactive) */}
+          {floorBelowWalls.map(wall => (
+            <WallShape
+              key={`below-${wall.id}`}
+              wall={wall}
+              isSelected={false}
+              opacity={0.3}
+              onSelect={() => {}} // Non-interactive for floor below
+              onDragEnd={() => {}} // Non-interactive for floor below
+            />
+          ))}
+          
+          {/* Render walls */}
+          {currentFloorWalls.map(wall => (
+            <WallShape
+              key={wall.id}
+              wall={wall}
+              isSelected={selectedWall === wall.id}
+              opacity={1}
+              onSelect={() => handleWallSelect(wall.id)}
+              onDragEnd={(e) => handleWallDragEnd(wall.id, e)}
+            />
+          ))}
+
+          {/* Render conveyor belts from floor below with faded opacity (non-interactive) */}
+          {floorBelowConveyors.map(belt => (
+            <MemoizedConveyorBeltShape
+              key={`below-${belt.id}`}
+              belt={belt}
+              opacity={0.3}
+              interactive={false}
+              onBeltClick={() => {}} // Non-interactive for floor below
+            />
+          ))}
+          
+          {/* Render conveyor belts */}
+          {currentFloorConveyors.map(belt => (
+            <MemoizedConveyorBeltShape
+              key={belt.id}
+              belt={belt}
+              opacity={1}
+              interactive={true}
+              onBeltClick={handleBeltClick}
+            />
+          ))}
+
+          {/* Render conveyor lifts */}
+          {Object.values(conveyorLifts).map(lift => (
+            <MemoizedConveyorLiftShape
+              key={lift.id}
+              lift={lift}
+            />
+          ))}
+
+          {/* Render pipe floor connections */}
+          {Object.values(pipeFloorConnections).map(connection => (
+            <MemoizedPipeFloorConnectionShape
+              key={connection.id}
+              connection={connection}
+            />
+          ))}
+          
+          {/* Render pipelines from floor below with faded opacity (non-interactive) */}
+          {floorBelowPipelines.map(pipeline => (
+            <MemoizedPipelineShape
+              key={`below-${pipeline.id}`}
+              pipeline={pipeline}
+              opacity={0.3}
+              interactive={false}
+              onPipeClick={() => {}} // Non-interactive for floor below
+            />
+          ))}
+          
+          {/* Render pipelines */}
+          {currentFloorPipelines.map(pipeline => (
+            <MemoizedPipelineShape
+              key={pipeline.id}
+              pipeline={pipeline}
+              opacity={1}
+              interactive={true}
+            />
+          ))}
+
+          {/* Render conveyor poles from floor below with faded opacity (non-interactive) */}
+          {floorBelowPoles.map(pole => (
+            <MemoizedConveyorPoleShape
+              key={`below-${pole.id}`}
+              pole={pole}
+              isSelected={false}
+              opacity={0.3}
+              interactive={false}
+              onSelect={() => {}} // Non-interactive for floor below
+            />
+          ))}
+          
+          {/* Render conveyor poles with proper mobile selection */}
+          {currentFloorPoles.map(pole => (
+            <MemoizedConveyorPoleShape
+              key={pole.id}
+              pole={pole}
+              isSelected={selectedPole === pole.id}
+              opacity={1}
+              interactive={true}
+              onSelect={() => handlePoleSelect(pole.id)}
+            />
+          ))}
+
+          {/* Render pipe supports from floor below with faded opacity (non-interactive) */}
+          {floorBelowPipeSupports.map(support => (
+            <MemoizedPipeSupportShape
+              key={`below-${support.id}`}
+              support={support}
+              isSelected={false}
+              opacity={0.3}
+              interactive={false}
+              onSelect={() => {}} // Non-interactive for floor below
+            />
+          ))}
+          
+          {/* Render pipe supports with proper mobile selection */}
+          {currentFloorPipeSupports.map(support => (
+            <MemoizedPipeSupportShape
+              key={support.id}
+              support={support}
+              isSelected={selectedPipeSupport === support.id}
+              opacity={1}
+              interactive={true}
+              onSelect={() => handlePipeSupportSelect(support.id)}
+            />
+          ))}
+          
+          {/* Render railways from floor below with faded opacity (non-interactive) */}
+          {floorBelowRailways.map(railway => (
+            <MemoizedRailwayShape
+              key={`below-${railway.id}`}
+              railway={railway}
+              opacity={0.3}
+              interactive={false}
+              onRailClick={() => {}} // Non-interactive for floor below
+            />
+          ))}
+          
+          {/* Render railways */}
+          {currentFloorRailways.map(railway => {
+            return (
+              <MemoizedRailwayShape
+                key={railway.id}
+                railway={railway}
+                opacity={1}
+                interactive={true}
+              />
+            );
+          })}
+          
+          {/* Railway debug overlay - shows overlapping nodes and junction info */}
+          <RailwayDebugOverlay visible={showRailwayDebug} />
+          
+          {/* Render sticky notes */}
+          {Object.values(stickyNotes).filter(note => note.floor === currentFloor).map(note => (
+            <MemoizedStickyNoteShape
+              key={note.id}
+              note={note}
+              isSelected={selectedStickyNote === note.id}
+              onSelect={() => handleStickyNoteSelect(note.id)}
+              onDragEnd={(e) => handleStickyNoteDragEnd(note.id, e)}
+            />
+          ))}
+          
+          {/* Drawing previews with consistent props */}
+          {drawingState.isDrawing && (
+            <ConveyorDrawingPreview
+              mousePos={stageRef.current?.getPointerPosition() || { x: 0, y: 0 }}
+              scale={scale}
+              position={position}
+              currentFloor={currentFloor}
+            />
+          )}
+
+
+          {drawingState.drawingRailway && (
+            <RailwayDrawingPreview
+              mousePos={stageRef.current?.getPointerPosition() || { x: 0, y: 0 }}
+              scale={scale}
+              position={position}
+              currentFloor={currentFloor}
+            />
+          )}
+          {drawingState.drawingPipe && (
+            <PipeDrawingPreview
+              mousePos={stageRef.current?.getPointerPosition() || { x: 0, y: 0 }}
+              scale={scale}
+              position={position}
+              currentFloor={currentFloor}
+            />
+          )}
+          {/* FIXED: Show foundation preview when tool is selected OR actively drawing */}
+          {(selectedTool === 'foundation' || drawingState.drawingFoundation) && (
+            <FoundationDrawingPreview
+              mousePos={stageRef.current?.getPointerPosition() || { x: mousePos.x * PIXELS_PER_METER, y: mousePos.y * PIXELS_PER_METER }}
+              scale={scale}
+              position={position}
+            />
+          )}
+          {/* FIXED: Show wall preview when tool is selected OR actively drawing */}
+          {(selectedTool === 'wall' || drawingState.drawingWall) && (
+            <WallDrawingPreview
+              mousePos={stageRef.current?.getPointerPosition() || { x: mousePos.x * PIXELS_PER_METER, y: mousePos.y * PIXELS_PER_METER }}
+              scale={scale}
+              position={position}
+              currentFloor={currentFloor}
+            />
+          )}
+          
+          {/* Enhanced grid snap indicator - only on higher performance */}
+          {config.shadowQuality !== 'low' && (selectedTool === 'pole' || selectedTool === 'pipe_support' || selectedTool === 'railway' || 
+            drawingState.isDrawing || drawingState.drawingRailway || drawingState.drawingPipe) && (
+            <Group>
+              <Circle
+                x={Math.round(mousePos.x * 2) / 2 * PIXELS_PER_METER}
+                y={Math.round(mousePos.y * 2) / 2 * PIXELS_PER_METER}
+                radius={8}
+                stroke={drawingState.drawingRailway ? "#666" : drawingState.drawingPipe ? "#00b7ff" : "#fa9549"}
+                strokeWidth={2}
+                opacity={0.6}
+                dash={[4, 4]}
+                listening={false}
+              />
+              
+              <Circle
+                x={Math.round(mousePos.x * 2) / 2 * PIXELS_PER_METER}
+                y={Math.round(mousePos.y * 2) / 2 * PIXELS_PER_METER}
+                radius={2}
+                fill={drawingState.drawingRailway ? "#666" : drawingState.drawingPipe ? "#00b7ff" : "#fa9549"}
+                opacity={0.8}
+                listening={false}
+              />
+            </Group>
+          )}
+        </Layer>
+      </Stage>
+      
+      {/* Enhanced controls with better mobile styling */}
+<div className={`absolute ${isMobile ? 'bottom-24' : 'bottom-6'} right-6 z-20`}>
+  <div className={`${panelClass} p-3 space-y-3`}>
+    <AnimatedButton
+      whileHover={config.enableAnimations ? { scale: 1.1 } : undefined}
+      whileTap={config.enableAnimations ? { scale: 0.9 } : undefined}
+      className={`sci-fi-button p-3 w-full flex items-center justify-center ${isMobile ? 'min-h-[48px]' : ''}`}
+      onClick={() => setScale(Math.min(scale * 1.1, MAX_ZOOM))}
+    >
+      <ZoomIn size={isMobile ? 24 : 20} />
+    </AnimatedButton>
+    
+    <div className="text-center text-sm font-mono font-bold text-orange-300">
+      {Math.round(scale * 100)}%
+    </div>
+    
+    <AnimatedButton
+      whileHover={config.enableAnimations ? { scale: 1.1 } : undefined}
+      whileTap={config.enableAnimations ? { scale: 0.9 } : undefined}
+      className={`sci-fi-button p-3 w-full flex items-center justify-center ${isMobile ? 'min-h-[48px]' : ''}`}
+      onClick={() => setScale(Math.max(scale / 1.1, MIN_ZOOM))}
+    >
+      <ZoomOut size={isMobile ? 24 : 20} />
+    </AnimatedButton>
+  </div>
+</div>
+    </div>
+  );
+};
