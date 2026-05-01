@@ -36,6 +36,9 @@ src-tauri/~/.tauri/salt.key
 src-tauri/.tauri-signing-key
 src-tauri/.tauri-signing-key.pub
 
-# Local Claude Code config
+# Local AI agent configs (must NEVER be committed to a public OSS repo)
 .claude/
 .grok/
+CLAUDE.md
+GEMINI.md
+AGENTS.md
