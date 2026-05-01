@@ -13,6 +13,7 @@ simulation — on a fast 2D canvas backed by a native Rust core.
 [![Rust](https://img.shields.io/badge/Rust-1.77+-CE422B.svg)](https://www.rust-lang.org)
 
 [**⬇ Download**](https://github.com/HandleConsolidated/nexus-satisfactory-layout-tool/releases/latest)
+&nbsp;·&nbsp; [💬 Subreddit](https://www.reddit.com/r/NexusSatisfactoryTool/)
 &nbsp;·&nbsp; [Features](#-features)
 &nbsp;·&nbsp; [Build](#-build-from-source)
 &nbsp;·&nbsp; [Contribute](CONTRIBUTING.md)
@@ -30,6 +31,7 @@ If this tool saves you time, please consider supporting development:
 
 ### ☕ &nbsp;[Donate via Stripe](https://donate.stripe.com/3cI9ATg8l6i9gPP88t5EY00)
 
+💬 [Join the subreddit](https://www.reddit.com/r/NexusSatisfactoryTool/) &nbsp;·&nbsp;
 ⭐ Star the repo &nbsp;·&nbsp;
 🐛 [Report a bug](https://github.com/HandleConsolidated/nexus-satisfactory-layout-tool/issues/new?template=bug_report.md) &nbsp;·&nbsp;
 💡 [Suggest a feature](https://github.com/HandleConsolidated/nexus-satisfactory-layout-tool/issues/new?template=feature_request.md) &nbsp;·&nbsp;
